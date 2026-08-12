@@ -3467,7 +3467,7 @@ openMonitorInTheSameTab(int i, FFI ffi, PeerInfo pi,
 // For now just open new window.
 //
 // screenRect is used to move the new window to the specified screen and set fullscreen.
-openMonitorInNewTabOrWindow(int i, String peerId, PeerInfo pi,
+Future<void> openMonitorInNewTabOrWindow(int i, String peerId, PeerInfo pi,
     {Rect? screenRect}) {
   final args = {
     'window_id': stateGlobal.windowId,
@@ -3484,7 +3484,7 @@ openMonitorInNewTabOrWindow(int i, String peerId, PeerInfo pi,
       'b': screenRect.bottom,
     };
   }
-  DesktopMultiWindow.invokeMethod(
+  return DesktopMultiWindow.invokeMethod(
       kMainWindowId, kWindowEventOpenMonitorSession, jsonEncode(args));
 }
 

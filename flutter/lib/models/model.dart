@@ -1572,9 +1572,17 @@ class FfiModel with ChangeNotifier {
     final length = _pi.displays.length < screenRectList.length
         ? _pi.displays.length
         : screenRectList.length;
+    // Sequentially, so the windows are created in display order every time:
+    // the taskbar lists buttons in creation order, and this keeps that order
+    // stable across sessions. It also serializes the reuse of hidden windows.
     for (var i = 1; i < length; i++) {
-      openMonitorInNewTabOrWindow(i, peerId, _pi,
-          screenRect: hasSavedDisplayFrame(i) ? null : screenRectList[i]);
+      try {
+        await openMonitorInNewTabOrWindow(i, peerId, _pi,
+            screenRect: hasSavedDisplayFrame(i) ? null : screenRectList[i]);
+      } catch (e) {
+        // One display failing to open must not stop the remaining ones.
+        debugPrint("Failed to open display $i in its own window: $e");
+      }
     }
   }
 

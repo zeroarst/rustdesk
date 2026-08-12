@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 
@@ -103,14 +104,22 @@ class RustDeskMultiWindowManager {
     final windowIDs = isCamera ? _viewCameraWindows : _remoteDesktopWindows;
     if (windowIDs.length > 1) {
       for (final windowId in windowIDs) {
-        if (await DesktopMultiWindow.invokeMethod(
-            windowId,
-            kWindowEventActiveDisplaySession,
-            jsonEncode({
-              'id': peerId,
-              'display': display,
-            }))) {
-          return;
+        try {
+          if (await DesktopMultiWindow.invokeMethod(
+              windowId,
+              kWindowEventActiveDisplaySession,
+              jsonEncode({
+                'id': peerId,
+                'display': display,
+              }))) {
+            return;
+          }
+        } catch (e) {
+          // A window that is still booting (or already torn down) has no
+          // method handler yet and throws MissingPluginException. It cannot
+          // be showing this display — skip it instead of failing the open.
+          debugPrint(
+              "Failed to probe window $windowId for display $display: $e");
         }
       }
     }
@@ -197,21 +206,28 @@ class RustDeskMultiWindowManager {
         return call(type, methodName, msg);
       }
     } else {
-      if (_inactiveWindows.isNotEmpty) {
-        for (final windowId in windows) {
-          if (_inactiveWindows.contains(windowId)) {
-            if (screenRect == null) {
-              await restoreWindowPosition(type,
-                  windowId: windowId, peerId: remoteId);
-            }
-            await DesktopMultiWindow.invokeMethod(windowId, methodName, msg);
-            if (methodName != kWindowEventNewRemoteDesktop) {
-              WindowController.fromWindowId(windowId).show();
-            }
-            registerActiveWindow(windowId);
-            return MultiWindowCallResult(windowId, null);
-          }
+      // Reserve the reused window synchronously: concurrent calls (e.g. one
+      // openMonitorSession per display on reconnect) interleave at the awaits
+      // below, and would otherwise all pick the same hidden window, piling
+      // the displays up as tabs in it while the other windows stay hidden.
+      final reusedWindowId =
+          pickAndReserveInactiveWindow(windows, _inactiveWindows);
+      if (reusedWindowId != null) {
+        // Remote-desktop windows restore their own (peer, display) frame in
+        // the kWindowEventNewRemoteDesktop handler. Restoring here too would
+        // move the window from the main isolate before the target isolate
+        // has suppressed transition saves — the target then records this
+        // transient shared-key frame as the display's remembered layout.
+        if (screenRect == null && methodName != kWindowEventNewRemoteDesktop) {
+          await restoreWindowPosition(type,
+              windowId: reusedWindowId, peerId: remoteId);
         }
+        await DesktopMultiWindow.invokeMethod(reusedWindowId, methodName, msg);
+        if (methodName != kWindowEventNewRemoteDesktop) {
+          WindowController.fromWindowId(reusedWindowId).show();
+        }
+        registerActiveWindow(reusedWindowId);
+        return MultiWindowCallResult(reusedWindowId, null);
       }
       final windowId = await newSessionWindow(
           type, remoteId, msg, windows, screenRect != null);
