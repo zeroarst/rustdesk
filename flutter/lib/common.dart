@@ -39,6 +39,7 @@ import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'models/model.dart';
 import 'models/platform_model.dart';
 
@@ -1801,6 +1802,13 @@ Future<void> saveWindowPosition(WindowType type,
     debugPrint(
         "Error: windowId cannot be null when saving positions for sub window");
   }
+  // Programmatic transitions (restore sequences, fullscreen resets on window
+  // reuse) fire the same native events as user moves/resizes; saving during
+  // one would persist a half-applied state over the user's arranged layout.
+  if (windowTransitionSuppressor.isActive) {
+    debugPrint("Skip saving window position: programmatic transition active");
+    return;
+  }
 
   Offset? position;
   Size? sz;
@@ -1892,6 +1900,13 @@ Future<void> saveWindowPosition(WindowType type,
 }
 
 Future<void> _saveWindowPositionActual(WindowKey key) async {
+  // The state was captured up to a debounce-interval ago; if a programmatic
+  // transition started since, the captured frame may be transient — drop it.
+  if (windowTransitionSuppressor.isActive) {
+    debugPrint(
+        "Skip persisting window position: programmatic transition active");
+    return;
+  }
   LastWindowPosition? pos = _lastWindowPosition;
 
   if (pos != null) {
@@ -2187,6 +2202,11 @@ Future<bool> restoreWindowPosition(WindowType type,
       return true;
     default:
       final wc = WindowController.fromWindowId(windowId!);
+      // The frame is applied in steps (setFrame, then maximize/fullscreen
+      // after a 300ms delay); suppress saves so the events fired between the
+      // steps cannot persist the intermediate windowed state.
+      windowTransitionSuppressor
+          .suppressFor(const Duration(milliseconds: 1500));
       restoreFrame() async {
         if (offsetLeftTop == null) {
           await wc.center();
@@ -2203,7 +2223,15 @@ Future<bool> restoreWindowPosition(WindowType type,
         // An duration is needed to avoid the window being restored after fullscreen.
         Future.delayed(Duration(milliseconds: 300), () async {
           if (kWindowId == windowId) {
-            stateGlobal.setFullscreen(true);
+            if (stateGlobal.fullscreen.isTrue) {
+              // The Dart flag can be stale: an earlier restore already set it,
+              // and the setFrame above dropped native fullscreen without
+              // updating it — setFullscreen would no-op. Re-assert natively.
+              await WindowController.fromWindowId(windowId)
+                  .setFullscreen(true);
+            } else {
+              stateGlobal.setFullscreen(true);
+            }
           } else {
             // If is not current window, we need to send a fullscreen message to `windowId`
             DesktopMultiWindow.invokeMethod(
@@ -3506,6 +3534,9 @@ tryMoveToScreenAndSetFullscreen(Rect? screenRect) async {
   if (screenRect == null) {
     return;
   }
+  // Same as restoreWindowPosition: don't let the move+fullscreen transition
+  // save its intermediate frames as if the user had arranged them.
+  windowTransitionSuppressor.suppressFor(const Duration(milliseconds: 1500));
   final wc = WindowController.fromWindowId(stateGlobal.windowId);
   final curFrame = await wc.getFrame();
   final frame =

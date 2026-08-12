@@ -16,6 +16,7 @@ import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
     as mod_menu;
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:bot_toast/bot_toast.dart';
@@ -443,6 +444,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       final screenRect = parseParamScreenRect(args);
       final prePeerCount = tabController.length;
       Future.delayed(Duration.zero, () async {
+        // Resetting a reused window's leftover fullscreen and applying the
+        // new frame are programmatic; without suppression their events save
+        // "maximized, not fullscreen" over the layout the user arranged.
+        windowTransitionSuppressor
+            .suppressFor(const Duration(milliseconds: 1500));
         if (stateGlobal.fullscreen.isTrue) {
           await WindowController.fromWindowId(windowId()).setFullscreen(false);
           stateGlobal.setFullscreen(false, procWnd: false);
@@ -563,7 +569,19 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         }
       }
     } else if (call.method == kWindowEventSetFullscreen) {
-      stateGlobal.setFullscreen(call.arguments == 'true');
+      // Sent by restoreWindowPosition of another isolate; the transition is
+      // programmatic, so keep its events out of the saved layout.
+      windowTransitionSuppressor
+          .suppressFor(const Duration(milliseconds: 1500));
+      final v = call.arguments == 'true';
+      if (v && stateGlobal.fullscreen.isTrue) {
+        // Stale flag: native fullscreen may have been dropped by a setFrame
+        // while the flag stayed true — setFullscreen would no-op, so
+        // re-assert the native state directly.
+        await WindowController.fromWindowId(windowId()).setFullscreen(true);
+      } else {
+        stateGlobal.setFullscreen(v);
+      }
     }
     _update_remote_count();
     return returnValue;
