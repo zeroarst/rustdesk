@@ -379,6 +379,12 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
       loopCloseWindow();
     }
+    // Close this peer's windows on the other displays too, if enabled.
+    if (bind.mainGetPeerFlutterOptionSync(
+            id: id, k: kOptionCloseAllWindowsTogether) ==
+        'Y') {
+      rustDeskWinManager.call(WindowType.Main, kWindowEventCloseForPeer, id);
+    }
     ConnectionTypeState.delete(id);
     // Clean up relative mouse mode state for this peer.
     stateGlobal.relativeMouseModeState.remove(id);
@@ -498,6 +504,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         windowOnTop(windowId());
       }
       return jumpOk;
+    } else if (call.method == kWindowEventCloseForPeer) {
+      final peerId = call.arguments as String;
+      if (tabController.state.value.tabs.any((e) => e.key == peerId)) {
+        tabController.closeBy(peerId);
+      }
     } else if (call.method == kWindowEventGetRemoteList) {
       return tabController.state.value.tabs
           .map((e) => e.key)

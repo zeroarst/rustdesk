@@ -453,6 +453,20 @@ class RustDeskMultiWindowManager {
     await Future.wait(WindowType.values.map((e) => _closeWindows(e)));
   }
 
+  // Ask every remote-desktop window to close its session of the given peer.
+  // Must be called in the main window thread.
+  Future<void> closeRemoteWindowsOfPeer(String peerId) async {
+    for (final windowId in _remoteDesktopWindows.toList()) {
+      try {
+        await DesktopMultiWindow.invokeMethod(
+            windowId, kWindowEventCloseForPeer, peerId);
+      } catch (e) {
+        debugPrint(
+            "Failed to close session of \"$peerId\" in window $windowId: $e");
+      }
+    }
+  }
+
   Future<void> _closeWindows(WindowType type) async {
     if (type == WindowType.Main) {
       // skip main window, use window manager instead
