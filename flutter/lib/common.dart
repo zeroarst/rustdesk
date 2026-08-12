@@ -38,6 +38,7 @@ import 'desktop/pages/remote_page.dart' as desktop_remote;
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
+import 'package:flutter_hbb/common/shared_state.dart';
 import 'models/model.dart';
 import 'models/platform_model.dart';
 
@@ -1782,6 +1783,11 @@ String get windowFramePrefix =>
         ? "incoming_"
         : (bind.isOutgoingOnly() ? "outgoing_" : ""));
 
+// Frame key for one specific remote display, so layouts with one window per
+// display can be saved and restored per (peer, display).
+String perDisplayFrameKey(WindowType type, int display) =>
+    '${windowFramePrefix}${type.name}_d$display';
+
 typedef WindowKey = ({WindowType type, int? windowId});
 
 LastWindowPosition? _lastWindowPosition = null;
@@ -1908,10 +1914,9 @@ Future _saveSessionWindowPosition(WindowType windowType, int windowId,
     bool isMaximized, bool isFullscreen, LastWindowPosition pos) async {
   final remoteList = await DesktopMultiWindow.invokeMethod(
       windowId, kWindowEventGetRemoteList, null);
-  getPeerPos(String peerId) {
+  getPeerPos(String peerId, String key) {
     if (isMaximized || isFullscreen) {
-      final peerPos = bind.mainGetPeerFlutterOptionSync(
-          id: peerId, k: windowFramePrefix + windowType.name);
+      final peerPos = bind.mainGetPeerFlutterOptionSync(id: peerId, k: key);
       var lpos = LastWindowPosition.loadFromString(peerPos);
       return LastWindowPosition(
               lpos?.width ?? pos.offsetWidth,
@@ -1928,10 +1933,25 @@ Future _saveSessionWindowPosition(WindowType windowType, int windowId,
 
   if (remoteList != null) {
     for (final peerId in remoteList.split(',')) {
+      final sharedKey = windowFramePrefix + windowType.name;
       bind.mainSetPeerFlutterOptionSync(
-          id: peerId,
-          k: windowFramePrefix + windowType.name,
-          v: getPeerPos(peerId));
+          id: peerId, k: sharedKey, v: getPeerPos(peerId, sharedKey));
+      // Also save the frame keyed by the display this window currently shows,
+      // so multi-window layouts (one window per display) can restore each
+      // window to its own monitor on the next connection.
+      // Only from the window's own isolate (move/resize events), where
+      // CurrentDisplayState is authoritative for this peer.
+      if (windowType == WindowType.RemoteDesktop && windowId == kWindowId) {
+        int display = -1;
+        try {
+          display = CurrentDisplayState.find(peerId).value;
+        } catch (_) {}
+        if (display >= 0 && display != kAllDisplayValue) {
+          final displayKey = perDisplayFrameKey(windowType, display);
+          bind.mainSetPeerFlutterOptionSync(
+              id: peerId, k: displayKey, v: getPeerPos(peerId, displayKey));
+        }
+      }
     }
   }
 }
@@ -2045,16 +2065,28 @@ Future<bool> restoreWindowPosition(WindowType type,
   }
 
   bool isRemotePeerPos = false;
+  bool isPerDisplayPos = false;
   String? pos;
   // No need to check mainGetLocalBoolOptionSync(kOptionOpenNewConnInTabs)
   // Though "open in tabs" is true and the new window restore peer position, it's ok.
   if ((type == WindowType.RemoteDesktop || type == WindowType.ViewCamera) &&
       windowId != null &&
       peerId != null) {
-    final peerPos = bind.mainGetPeerFlutterOptionSync(
-        id: peerId, k: windowFramePrefix + type.name);
-    if (peerPos.isNotEmpty) {
-      pos = peerPos;
+    // Prefer the frame saved for this specific display, if any.
+    if (display != null) {
+      final displayPos = bind.mainGetPeerFlutterOptionSync(
+          id: peerId, k: perDisplayFrameKey(type, display));
+      if (displayPos.isNotEmpty) {
+        pos = displayPos;
+        isPerDisplayPos = true;
+      }
+    }
+    if (pos == null) {
+      final peerPos = bind.mainGetPeerFlutterOptionSync(
+          id: peerId, k: windowFramePrefix + type.name);
+      if (peerPos.isNotEmpty) {
+        pos = peerPos;
+      }
     }
     isRemotePeerPos = pos != null;
   }
@@ -2090,7 +2122,9 @@ Future<bool> restoreWindowPosition(WindowType type,
         lpos.offsetHeight = lpos.offsetHeight! + windowId * kNewWindowOffset;
       }
     }
-    if (display != null) {
+    // The cascade offset does not apply to per-display frames — they are
+    // absolute positions remembered for this exact display.
+    if (display != null && !isPerDisplayPos) {
       if (lpos.offsetWidth != null) {
         lpos.offsetWidth = lpos.offsetWidth! + display * kNewWindowOffset;
       }

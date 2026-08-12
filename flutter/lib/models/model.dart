@@ -1553,14 +1553,28 @@ class FfiModel with ChangeNotifier {
     } catch (e) {
       //
     }
-    await tryMoveToScreenAndSetFullscreen(screenRectList[0]);
+
+    // If a frame was saved for a (peer, display) pair, restore it — position
+    // and fullscreen/maximized state — instead of the default fullscreen on
+    // the index-matched local screen.
+    hasSavedDisplayFrame(int d) => bind
+        .mainGetPeerFlutterOptionSync(
+            id: peerId, k: perDisplayFrameKey(WindowType.RemoteDesktop, d))
+        .isNotEmpty;
+
+    if (hasSavedDisplayFrame(0)) {
+      await restoreWindowPosition(WindowType.RemoteDesktop,
+          windowId: stateGlobal.windowId, peerId: peerId, display: 0);
+    } else {
+      await tryMoveToScreenAndSetFullscreen(screenRectList[0]);
+    }
 
     final length = _pi.displays.length < screenRectList.length
         ? _pi.displays.length
         : screenRectList.length;
     for (var i = 1; i < length; i++) {
       openMonitorInNewTabOrWindow(i, peerId, _pi,
-          screenRect: screenRectList[i]);
+          screenRect: hasSavedDisplayFrame(i) ? null : screenRectList[i]);
     }
   }
 
