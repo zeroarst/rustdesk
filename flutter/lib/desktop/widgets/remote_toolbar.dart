@@ -26,6 +26,7 @@ import '../../common/shared_state.dart';
 import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
 import 'package:flutter_hbb/utils/scale.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
 
 enum _ToolbarEdge { top, right, bottom, left }
@@ -272,10 +273,19 @@ class ToolbarState {
   bool get pin => _pin.value;
 
   /// Initialize all toolbar states from session options.
+  // When set, collapse/hide are remembered per (peer, display) in the local
+  // config; otherwise the legacy per-peer session toggles are used.
+  String? _peerId;
+  int? _display;
+
   /// This should be called once when the toolbar is first created.
-  Future<void> init(SessionID sessionId) async {
+  /// [peerId] and [display] enable per-window (per-display) state memory;
+  /// without them the legacy shared per-peer state applies (e.g. camera).
+  Future<void> init(SessionID sessionId, {String? peerId, int? display}) async {
     if (initialized.value || _isInitializing) return;
     _isInitializing = true;
+    _peerId = peerId;
+    _display = display;
 
     try {
       // Load both states in parallel for better performance
@@ -286,24 +296,54 @@ class ToolbarState {
             sessionId: sessionId, arg: kOptionHideToolbar),
       ]);
 
-      collapse.value = results[0] ?? false;
-      hide.value = results[1] ?? false;
+      // A per-display value wins; the per-peer option is the default for
+      // windows whose toolbar was never toggled.
+      collapse.value =
+          _readPerDisplay(toolbarCollapseKey) ?? results[0] ?? false;
+      hide.value = _readPerDisplay(toolbarHideKey) ?? results[1] ?? false;
     } finally {
       _isInitializing = false;
       initialized.value = true;
     }
   }
 
+  bool? _readPerDisplay(String Function(String, int) keyOf) {
+    final peerId = _peerId;
+    final display = _display;
+    if (peerId == null || display == null) return null;
+    switch (bind.getLocalFlutterOption(k: keyOf(peerId, display))) {
+      case 'Y':
+        return true;
+      case 'N':
+        return false;
+      default:
+        return null;
+    }
+  }
+
+  bool _writePerDisplay(String Function(String, int) keyOf, bool value) {
+    final peerId = _peerId;
+    final display = _display;
+    if (peerId == null || display == null) return false;
+    bind.setLocalFlutterOption(
+        k: keyOf(peerId, display), v: value ? 'Y' : 'N');
+    return true;
+  }
+
   switchCollapse(SessionID sessionId) async {
-    bind.sessionToggleOption(
-        sessionId: sessionId, value: kOptionCollapseToolbar);
     collapse.value = !collapse.value;
+    if (!_writePerDisplay(toolbarCollapseKey, collapse.value)) {
+      bind.sessionToggleOption(
+          sessionId: sessionId, value: kOptionCollapseToolbar);
+    }
   }
 
   // Switch hide state for entire toolbar visibility
   switchHide(SessionID sessionId) async {
-    bind.sessionToggleOption(sessionId: sessionId, value: kOptionHideToolbar);
     hide.value = !hide.value;
+    if (!_writePerDisplay(toolbarHideKey, hide.value)) {
+      bind.sessionToggleOption(sessionId: sessionId, value: kOptionHideToolbar);
+    }
   }
 
   switchPin() async {
@@ -643,8 +683,10 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _syncDockingOptions(force: cached == null || shouldResetToTop);
-      // Initialize toolbar states (collapse, hide) from session options
-      widget.state.init(widget.ffi.sessionId);
+      // Initialize toolbar states (collapse, hide): per (peer, display)
+      // local values first, per-peer session options as the default.
+      widget.state.init(widget.ffi.sessionId,
+          peerId: widget.id, display: widget.ffi.ffiModel.pi.currentDisplay);
     });
 
     _debouncerHide = Debouncer<int>(
@@ -1537,6 +1579,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         scrollStyle(state, colorScheme),
         imageQuality(),
         codec(),
+        taskbarOrder(),
         if (ffi.connType == ConnType.defaultConn)
           _ResolutionsMenu(
             id: widget.id,
@@ -1798,6 +1841,27 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                     ffi: ffi))
                 .toList(),
           ]);
+        });
+  }
+
+  taskbarOrder() {
+    return futureBuilder(
+        future: toolbarTaskbarOrder(context, id, ffi),
+        hasData: (data) {
+          final v = data as List<TRadioMenu<String>>;
+          if (v.isEmpty) return Offstage();
+
+          return _SubmenuButton(
+              ffi: widget.ffi,
+              child: Text(translate('Taskbar order')),
+              menuChildren: v
+                  .map((e) => RdoMenuButton(
+                      value: e.value,
+                      groupValue: e.groupValue,
+                      onChanged: e.onChanged,
+                      child: e.child,
+                      ffi: ffi))
+                  .toList());
         });
   }
 

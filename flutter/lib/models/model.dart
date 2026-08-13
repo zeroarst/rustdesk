@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
@@ -1541,13 +1542,30 @@ class FfiModel with ChangeNotifier {
     //
     // 0 is assumed to be the primary display here, for now.
 
-    // move to the first display and set fullscreen
+    final length = _pi.displays.length < screenRectList.length
+        ? _pi.displays.length
+        : screenRectList.length;
+
+    // User-assigned taskbar order: this window shows the rank-1 display and
+    // the rest open in rank order, so the taskbar button order matches the
+    // ranks. No ranks stored keeps the default (index order, display 0 first).
+    final ranks = <int, int>{};
+    for (var i = 0; i < length; i++) {
+      final rank = int.tryParse(
+          bind.getLocalFlutterOption(k: taskbarOrderKey(peerId, i)));
+      if (rank != null) ranks[i] = rank;
+    }
+    final order = computeDisplayOpenOrder(ranks, length);
+    final first = order.first;
+
+    // Show the rank-1 display in this window (generalized from the previous
+    // hardcoded display 0).
     bind.sessionSwitchDisplay(
       isDesktop: isDesktop,
       sessionId: sessionId,
-      value: Int32List.fromList([0]),
+      value: Int32List.fromList([first]),
     );
-    _pi.currentDisplay = 0;
+    _pi.currentDisplay = first;
     try {
       CurrentDisplayState.find(peerId).value = _pi.currentDisplay;
     } catch (e) {
@@ -1562,20 +1580,17 @@ class FfiModel with ChangeNotifier {
             id: peerId, k: perDisplayFrameKey(WindowType.RemoteDesktop, d))
         .isNotEmpty;
 
-    if (hasSavedDisplayFrame(0)) {
+    if (hasSavedDisplayFrame(first)) {
       await restoreWindowPosition(WindowType.RemoteDesktop,
-          windowId: stateGlobal.windowId, peerId: peerId, display: 0);
+          windowId: stateGlobal.windowId, peerId: peerId, display: first);
     } else {
-      await tryMoveToScreenAndSetFullscreen(screenRectList[0]);
+      await tryMoveToScreenAndSetFullscreen(screenRectList[first]);
     }
 
-    final length = _pi.displays.length < screenRectList.length
-        ? _pi.displays.length
-        : screenRectList.length;
-    // Sequentially, so the windows are created in display order every time:
-    // the taskbar lists buttons in creation order, and this keeps that order
-    // stable across sessions. It also serializes the reuse of hidden windows.
-    for (var i = 1; i < length; i++) {
+    // Sequentially, so the windows are created in rank order every time:
+    // the taskbar lists buttons in creation order. It also serializes the
+    // reuse of hidden windows.
+    for (final i in order.skip(1)) {
       try {
         await openMonitorInNewTabOrWindow(i, peerId, _pi,
             screenRect: hasSavedDisplayFrame(i) ? null : screenRectList[i]);

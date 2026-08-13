@@ -66,4 +66,50 @@ void main() {
       expect(s.isActive, true);
     });
   });
+
+  group('per-display local keys', () {
+    test('perDisplayLocalKey composes prefix, display and peer', () {
+      expect(perDisplayLocalKey('some-pref', 'peer1', 2), 'some-pref-d2_peer1');
+    });
+
+    test('taskbarOrderKey format is unchanged by the refactor', () {
+      expect(taskbarOrderKey('180824860', 3), 'taskbar-order-d3_180824860');
+      expect(taskbarOrderKey('other', 0), 'taskbar-order-d0_other');
+    });
+
+    test('toolbar state keys scope to peer and display', () {
+      expect(toolbarCollapseKey('180824860', 3),
+          'toolbar-collapse-d3_180824860');
+      expect(toolbarHideKey('180824860', 0), 'toolbar-hide-d0_180824860');
+    });
+  });
+
+  group('computeDisplayOpenOrder', () {
+    test('no ranks keeps index order', () {
+      expect(computeDisplayOpenOrder({}, 4), [0, 1, 2, 3]);
+    });
+
+    test('full permutation follows ranks', () {
+      // M1(d0)->3, M2(d1)->1, M3(d2)->4, M4(d3)->2
+      expect(computeDisplayOpenOrder({0: 3, 1: 1, 2: 4, 3: 2}, 4),
+          [1, 3, 0, 2]);
+    });
+
+    test('unranked displays go last in index order', () {
+      expect(computeDisplayOpenOrder({3: 1}, 4), [3, 0, 1, 2]);
+    });
+
+    test('duplicate ranks tie-break by display index', () {
+      expect(computeDisplayOpenOrder({1: 2, 2: 2}, 4), [1, 2, 0, 3]);
+    });
+
+    test('ranks for displays that no longer exist are ignored', () {
+      expect(computeDisplayOpenOrder({7: 1}, 4), [0, 1, 2, 3]);
+    });
+
+    test('every display appears exactly once', () {
+      final order = computeDisplayOpenOrder({2: 1, 0: 2}, 3);
+      expect(order..sort(), [0, 1, 2]);
+    });
+  });
 }

@@ -12,6 +12,7 @@ import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/window_transition.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -882,6 +883,41 @@ Future<List<TToggleMenu>> toolbarCursor(
     ));
   }
   return v;
+}
+
+/// Radio entries for the "Taskbar order" submenu: the rank of the display
+/// this window is currently showing, used to sort the window-open order on
+/// connect (and therefore the taskbar button order). '' = unranked (last).
+Future<List<TRadioMenu<String>>> toolbarTaskbarOrder(
+    BuildContext context, String id, FFI ffi) async {
+  final pi = ffi.ffiModel.pi;
+  if (!pi.isSupportMultiDisplay || pi.displaysCount.value <= 1) {
+    return [];
+  }
+  final display = pi.currentDisplay;
+  if (display < 0 || display == kAllDisplayValue) {
+    return [];
+  }
+  final key = taskbarOrderKey(id, display);
+  final groupValue = bind.getLocalFlutterOption(k: key);
+  onChanged(String? value) {
+    if (value == null) return;
+    bind.setLocalFlutterOption(k: key, v: value);
+  }
+
+  return [
+    TRadioMenu<String>(
+        child: Text(translate('None')),
+        value: '',
+        groupValue: groupValue,
+        onChanged: onChanged),
+    for (var rank = 1; rank <= pi.displaysCount.value; rank++)
+      TRadioMenu<String>(
+          child: Text('$rank'),
+          value: '$rank',
+          groupValue: groupValue,
+          onChanged: onChanged),
+  ];
 }
 
 Future<List<TToggleMenu>> toolbarDisplayToggle(

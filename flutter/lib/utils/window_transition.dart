@@ -52,3 +52,39 @@ class WindowTransitionSuppressor {
 
 /// Shared instance used by the window save/restore paths.
 final windowTransitionSuppressor = WindowTransitionSuppressor();
+
+/// LOCAL-config key scoped to one remote display of one peer. Per-display
+/// settings deliberately avoid peer-config (ui_flutter) keys: every live
+/// session window holds its own PeerConfig snapshot and re-stores it
+/// wholesale on its own events, clobbering peer-config keys written after
+/// connect — with one session per display, a value saved from any window
+/// would be reverted by the next save of any other window's session.
+String perDisplayLocalKey(String prefix, String peerId, int display) =>
+    '$prefix-d${display}_$peerId';
+
+/// Taskbar-order rank of one remote display ('1'..'n', empty = unranked).
+String taskbarOrderKey(String peerId, int display) =>
+    perDisplayLocalKey('taskbar-order', peerId, display);
+
+/// Toolbar collapsed state of one window ('Y'/'N', empty = use the
+/// per-peer default).
+String toolbarCollapseKey(String peerId, int display) =>
+    perDisplayLocalKey('toolbar-collapse', peerId, display);
+
+/// Toolbar hidden state of one window ('Y'/'N', empty = use the per-peer
+/// default).
+String toolbarHideKey(String peerId, int display) =>
+    perDisplayLocalKey('toolbar-hide', peerId, display);
+
+/// Order in which a multi-display session opens its windows (and therefore
+/// the taskbar button order): displays sorted by user-assigned rank, ties
+/// and unranked displays by display index, unranked after ranked.
+List<int> computeDisplayOpenOrder(Map<int, int> ranks, int displayCount) {
+  final displays = List.generate(displayCount, (i) => i);
+  int sortKey(int d) => ranks[d] ?? 1 << 30;
+  displays.sort((a, b) {
+    final byRank = sortKey(a).compareTo(sortKey(b));
+    return byRank != 0 ? byRank : a.compareTo(b);
+  });
+  return displays;
+}
