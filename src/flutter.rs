@@ -212,6 +212,19 @@ struct SessionHandler {
     renderer: VideoRenderer,
 }
 
+/// Every remote display the peer's open windows are showing, deduped and
+/// sorted. Empty while no window has claimed a display yet.
+fn collect_displays_in_use(handlers: &HashMap<SessionID, SessionHandler>) -> Vec<i32> {
+    let mut displays = handlers
+        .values()
+        .flat_map(|h| h.displays.iter().map(|d| *d as i32))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    displays.sort_unstable();
+    displays
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum RenderType {
     PixelBuffer,
@@ -976,6 +989,10 @@ impl InvokeUiSession for FlutterHandler {
 
     fn is_multi_ui_session(&self) -> bool {
         self.session_handlers.read().unwrap().len() > 1
+    }
+
+    fn displays_in_use(&self) -> Vec<i32> {
+        collect_displays_in_use(&self.session_handlers.read().unwrap())
     }
 
     fn set_current_display(&self, disp_idx: i32) {
@@ -2420,6 +2437,55 @@ pub(super) mod async_tasks {
         let _res = super::push_global_event(
             super::APP_TYPE_MAIN,
             serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window_showing(displays: &[usize]) -> SessionHandler {
+        let mut h = SessionHandler::default();
+        h.displays = displays.to_vec();
+        h
+    }
+
+    fn windows(displays: &[&[usize]]) -> HashMap<SessionID, SessionHandler> {
+        displays
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (SessionID::from_u128(i as u128 + 1), window_showing(d)))
+            .collect()
+    }
+
+    #[test]
+    fn collects_every_display_the_windows_show() {
+        // The four-monitor session: each window shows one remote display.
+        assert_eq!(
+            collect_displays_in_use(&windows(&[&[3], &[1], &[0], &[2]])),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn two_windows_on_one_display_yield_it_once() {
+        assert_eq!(
+            collect_displays_in_use(&windows(&[&[2], &[2]])),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_display_yet_contributes_nothing() {
+        assert!(collect_displays_in_use(&windows(&[&[]])).is_empty());
+    }
+
+    #[test]
+    fn an_all_displays_window_contributes_all_of_them() {
+        assert_eq!(
+            collect_displays_in_use(&windows(&[&[0, 1, 2], &[3]])),
+            vec![0, 1, 2, 3]
         );
     }
 }

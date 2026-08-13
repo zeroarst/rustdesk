@@ -84,6 +84,37 @@ void main() {
     });
   });
 
+  group('DisplayLayoutGate', () {
+    test('the first live peer info lays the displays out', () {
+      expect(DisplayLayoutGate().shouldLayOut(isCache: false), true);
+    });
+
+    test('a reconnect does not lay the displays out again', () {
+      // The window that laid the session out stays attached to the shared
+      // connection, so "Retry" delivers it a second live peer info.
+      final gate = DisplayLayoutGate();
+      gate.shouldLayOut(isCache: false);
+      expect(gate.shouldLayOut(isCache: false), false);
+    });
+
+    test('a window seeded with cached peer info never lays out', () {
+      // A monitor window is opened by an earlier layout and seeded with the
+      // session's cached peer info; on reconnect it gets a live one too.
+      // Laying out there is what turned 4 windows into 8.
+      final gate = DisplayLayoutGate();
+      expect(gate.shouldLayOut(isCache: true), false);
+      expect(gate.shouldLayOut(isCache: false), false);
+    });
+
+    test('skip() closes the gate before any peer info arrives', () {
+      // A session opened for one specific display must never lay out, even
+      // if a live peer info beats its cached seed.
+      final gate = DisplayLayoutGate();
+      gate.skip();
+      expect(gate.shouldLayOut(isCache: false), false);
+    });
+  });
+
   group('computeDisplayOpenOrder', () {
     test('no ranks keeps index order', () {
       expect(computeDisplayOpenOrder({}, 4), [0, 1, 2, 3]);

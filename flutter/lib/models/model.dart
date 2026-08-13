@@ -117,6 +117,7 @@ class FfiModel with ChangeNotifier {
   int? pendingMonitorRestore;
   Timer? _pendingRestoreTimer;
   Rect? _rect;
+  final _displayLayoutGate = DisplayLayoutGate();
 
   var _inputBlocked = false;
   final _permissions = <String, bool>{};
@@ -1485,10 +1486,17 @@ class FfiModel with ChangeNotifier {
 
     notifyListeners();
 
-    if (!isCache) {
+    // Once per session only: Rust broadcasts peer info to every window of the
+    // shared connection, so on reconnect each open window would otherwise
+    // re-open the whole set of monitor windows.
+    if (_displayLayoutGate.shouldLayOut(isCache: isCache)) {
       tryUseAllMyDisplaysForTheRemoteSession(peerId);
     }
   }
+
+  /// This session was opened to show one specific display, so the layout that
+  /// opened it must not run here again.
+  void skipUseAllMyDisplaysLayout() => _displayLayoutGate.skip();
 
   checkDesktopKeyboardMode() async {
     if (isInputSourceFlutter) {
@@ -3877,6 +3885,7 @@ class FFI {
         return;
       }
       ffiModel.pi.currentDisplay = display;
+      ffiModel.skipUseAllMyDisplaysLayout();
     }
     if (isDesktop && connType == ConnType.defaultConn) {
       textureModel.updateCurrentDisplay(display ?? 0);

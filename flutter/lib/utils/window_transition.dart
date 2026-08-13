@@ -76,6 +76,34 @@ String toolbarCollapseKey(String peerId, int display) =>
 String toolbarHideKey(String peerId, int display) =>
     perDisplayLocalKey('toolbar-hide', peerId, display);
 
+/// One-shot gate for the "use all my displays" layout.
+///
+/// Laying a session out across the local monitors opens one window per remote
+/// display, so it must happen once per session — but it is driven by the
+/// peer-info event, which Rust broadcasts to *every* UI session attached to
+/// the peer's shared connection. On the first connect only the window doing
+/// the layout is attached; after "Retry" all of them are, and each would open
+/// the whole set again (4 windows become 8).
+///
+/// The gate opens for the first *live* peer info a session sees and never
+/// again. A window opened by an earlier layout is seeded with that session's
+/// *cached* peer info, which closes the gate without laying anything out — it
+/// is already where the layout put it.
+class DisplayLayoutGate {
+  bool _peerInfoSeen = false;
+
+  /// Closes the gate up front, for a session opened to show one specific
+  /// display: whoever opened it has already done the layout.
+  void skip() => _peerInfoSeen = true;
+
+  /// Call once per peer-info event. True only for the first live one.
+  bool shouldLayOut({required bool isCache}) {
+    final isFirst = !_peerInfoSeen;
+    _peerInfoSeen = true;
+    return isFirst && !isCache;
+  }
+}
+
 /// Order in which a multi-display session opens its windows (and therefore
 /// the taskbar button order): displays sorted by user-assigned rank, ties
 /// and unranked displays by display index, unranked after ranked.

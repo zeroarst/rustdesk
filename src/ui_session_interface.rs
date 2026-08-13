@@ -1741,6 +1741,11 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn set_current_display(&self, disp_idx: i32);
     #[cfg(feature = "flutter")]
     fn is_multi_ui_session(&self) -> bool;
+    /// Remote displays the UI currently has windows for. Empty when the UI
+    /// does not track displays per window (non-flutter frontends).
+    fn displays_in_use(&self) -> Vec<i32> {
+        Vec::new()
+    }
     fn update_record_status(&self, start: bool);
     fn update_empty_dirs(&self, _res: ReadEmptyDirsResponse) {}
     fn printer_request(&self, id: i32, path: String);
@@ -1842,6 +1847,24 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         // Save recent peers, then push event to flutter. So flutter can refresh peer page.
         self.lc.write().unwrap().handle_peer_info(&pi);
         self.set_peer_info(&pi);
+        // A fresh connection captures the peer's primary display and nothing
+        // else, so after a reconnect every other window of a multi-window
+        // session is left waiting for frames that never arrive. Re-subscribe
+        // the displays the UI still has windows for. `add`, never `set`: a
+        // window whose display is not tracked here must not lose its stream.
+        let displays_in_use = self.displays_in_use();
+        if displays_in_use.len() > 1 {
+            self.capture_displays(displays_in_use.clone(), vec![], vec![]);
+            // Capturing alone can leave a window frozen on its last
+            // pre-disconnect frame: the peer emits a key frame when the
+            // service starts, and a window whose decoder is not ready yet
+            // misses it, then cannot decode anything that follows. Ask for
+            // one per display, as session_start_with_displays does. Switching
+            // a monitor away and back was the manual workaround for this.
+            for display in displays_in_use {
+                self.refresh_video(display);
+            }
+        }
         if self.is_file_transfer() {
             self.close_success();
         } else if !self.is_port_forward() && !self.is_terminal() {
