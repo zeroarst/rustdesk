@@ -1182,8 +1182,13 @@ class _ImagePaintState extends State<ImagePaint> {
   Widget _buildScrollAutoNonTextureRender(
       ImageModel m, CanvasModel c, double s) {
     double sizeScale = s;
-    if (widget.ffi.ffiModel.isPeerLinux) {
-      final displays = widget.ffi.ffiModel.pi.getCurDisplays();
+    // The canvas rect is in logical points for these peers (see
+    // FfiModel._getDisplaysRect) but the decoded frame is in physical pixels, so
+    // the painted size has to be divided back down by the display scale. The
+    // condition must match _getDisplaysRect exactly, hence the display count.
+    final displays = widget.ffi.ffiModel.pi.getCurDisplays();
+    if (widget.ffi.ffiModel.isPeerLinux ||
+        (widget.ffi.ffiModel.isPeerMacOS && displays.length > 1)) {
       if (displays.isNotEmpty) {
         sizeScale = s / displays[0].scale;
       }
@@ -1207,14 +1212,18 @@ class _ImagePaintState extends State<ImagePaint> {
     if (rect == null) {
       return Container();
     }
-    final isPeerLinux = ffiModel.isPeerLinux;
+    // See _buildScrollAutoNonTextureRender: the rect is logical, the texture is
+    // physical, so its painted size must be divided by the display scale. The
+    // condition must match _getDisplaysRect exactly, hence the display count.
+    final isScaledPeer = ffiModel.isPeerLinux ||
+        (ffiModel.isPeerMacOS && displays.length > 1);
     final curDisplay = ffiModel.pi.currentDisplay;
     for (var i = 0; i < displays.length; i++) {
       final textureId = widget.ffi.textureModel
           .getTextureId(curDisplay == kAllDisplayValue ? i : curDisplay);
       if (true) {
         // both "textureId.value != -1" and "true" seems ok
-        final sizeScale = isPeerLinux ? s / displays[i].scale : s;
+        final sizeScale = isScaledPeer ? s / displays[i].scale : s;
         children.add(Positioned(
           left: (displays[i].x - rect.left) * s + offset.dx,
           top: (displays[i].y - rect.top) * s + offset.dy,

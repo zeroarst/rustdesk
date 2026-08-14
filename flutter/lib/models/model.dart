@@ -170,6 +170,8 @@ class FfiModel with ChangeNotifier {
 
   bool get isPeerLinux => _pi.platform == kPeerPlatformLinux;
 
+  bool get isPeerMacOS => _pi.platform == kPeerPlatformMacOS;
+
   bool get viewOnly => _viewOnly;
   bool get showMyCursor => _showMyCursor;
 
@@ -190,7 +192,23 @@ class FfiModel with ChangeNotifier {
     if (displays.isEmpty) {
       return null;
     }
-    if (isPeerLinux) {
+    // macOS reports each display's origin in logical points (CGDisplayBounds) but
+    // its width/height in physical pixels, so a HiDPI screen must be divided by
+    // `scale` to land back in the same coordinate space as the origins. Linux
+    // already needed this for multi-monitor Wayland; macOS needs it whenever more
+    // than one display is streamed, which the server previously prevented by
+    // disabling retina capture for multiple video services.
+    //
+    // NOTE: this rect is the cursor/input coordinate space. The video frame is
+    // still delivered in physical pixels, so every site that sizes a frame from
+    // `Display.width/height` must divide by `scale` to match — see the
+    // `isPeerMacOS` branches in desktop/pages/remote_page.dart.
+    //
+    // Only when the rect spans MORE THAN ONE display. A single-display rect
+    // never has to reconcile its size against another display's origin, so it
+    // is already self-consistent in physical pixels and dividing it puts the
+    // pointer at half rate. Linux keeps its unconditional behaviour.
+    if (isPeerLinux || (isPeerMacOS && displays.length > 1)) {
       useDisplayScale = true;
     }
     int scale(int len, double s) {
