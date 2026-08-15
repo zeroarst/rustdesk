@@ -1,3 +1,4 @@
+mod display_park;
 mod keyboard;
 mod modifier_remap;
 /// cbindgen:ignore

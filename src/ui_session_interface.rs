@@ -803,6 +803,39 @@ impl<T: InvokeUiSession> Session<T> {
         if !use_texture_render() {
             self.capture_displays(vec![], vec![], vec![display]);
         }
+
+        // A switch that armed a scaled display on a macOS peer is chased
+        // with a re-parking switch so the host's Retina shim stays inert for
+        // the logical coordinates this client sends (src/display_park.rs).
+        // The arming switch is sent normally — not suppressed — because its
+        // echo carries the SupportedResolutions the resolution menu needs;
+        // the shim is armed only for the instant between the two messages.
+        // The flutter desktop layer prunes the park display's video
+        // subscription right afterwards (check_remove_unused_displays).
+        if display >= 0 && use_texture_render() && self.peer_platform() == "Mac OS" {
+            let park = {
+                let lc = self.lc.read().unwrap();
+                lc.peer_info.as_ref().and_then(|pi| {
+                    if crate::common::is_support_multi_ui_session(&pi.version)
+                        && crate::display_park::needs_repark_after_switch(
+                            &pi.displays,
+                            display as usize,
+                        )
+                    {
+                        crate::display_park::choose_park_display(&pi.displays)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(park) = park {
+                // The park target is scale-1, so this recursion cannot chase
+                // again.
+                if park as i32 != display {
+                    self.switch_display(park as i32);
+                }
+            }
+        }
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1773,6 +1806,27 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 current.cursor_embedded,
                 current.scale,
             );
+            // Park the host's `display_idx` on a scale-1 display when the
+            // macOS peer mixes display scales and the connection starts on a
+            // scaled one, so the host's Retina shim stays inert for the
+            // logical coordinates this client sends (src/display_park.rs).
+            // Multi-ui peers (>=1.2.4) ignore the resulting switch echo for
+            // current-display purposes, so the UI does not flip.
+            if pi.platform == "Mac OS"
+                && crate::common::is_support_multi_ui_session(&pi.version)
+            {
+                if let Some(park) = crate::display_park::choose_park_display(&pi.displays) {
+                    let cur = pi.current_display as usize;
+                    let cur_scaled = pi
+                        .displays
+                        .get(cur)
+                        .map(|d| d.scale > 1.0)
+                        .unwrap_or(false);
+                    if cur != park && cur_scaled {
+                        self.switch_display(park as i32);
+                    }
+                }
+            }
         }
         self.update_privacy_mode();
         // Clear audit_guid when connection is established successfully

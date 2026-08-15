@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/logical_display_layout.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/modifier_remap_dialog.dart';
@@ -2088,7 +2089,17 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   PeerInfo get pi => widget.ffi.ffiModel.pi;
   FfiModel get ffiModel => widget.ffi.ffiModel;
   Rect? get rect => scaledRect();
-  List<Resolution> get resolutions => pi.resolutions;
+  // Read the current display's own list; the legacy `pi.resolutions` only
+  // mirrors whichever display-changed message arrived last (see
+  // PeerInfo.resolutionsMap). No fallback to the legacy list: a display
+  // whose list never arrived in this window (the parked display, or one
+  // already captured by another window — see src/display_park.rs) shows an
+  // empty list rather than another display's modes, which would otherwise
+  // offer resolutions the display cannot take. The combined view keeps the
+  // legacy list (no single display to name).
+  List<Resolution> get resolutions => pi.currentDisplay == kAllDisplayValue
+      ? pi.resolutions
+      : (pi.resolutionsMap[pi.currentDisplay] ?? []);
   bool get isWayland => bind.mainCurrentIsWayland();
 
   @override
@@ -2100,11 +2111,21 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   }
 
   Rect? scaledRect() {
-    final scale = pi.scaleOfDisplay(pi.currentDisplay);
     final rect = ffiModel.rect;
     if (rect == null) {
       return null;
     }
+    // In logical-layout mode the rect is already in points (see
+    // useLogicalDisplayLayout / FfiModel._getDisplaysRect); dividing it by
+    // the display scale again would halve the reported resolution. Only the
+    // legacy info-space rect still needs the divide.
+    if (useLogicalDisplayLayout(
+        isPeerLinux: ffiModel.isPeerLinux,
+        isPeerMacOS: ffiModel.isPeerMacOS,
+        allDisplayScales: pi.displays.map((d) => d.scale))) {
+      return rect;
+    }
+    final scale = pi.scaleOfDisplay(pi.currentDisplay);
     return Rect.fromLTWH(
       rect.left,
       rect.top,

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common/logical_display_layout.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:get/get.dart';
@@ -1183,12 +1184,16 @@ class _ImagePaintState extends State<ImagePaint> {
       ImageModel m, CanvasModel c, double s) {
     double sizeScale = s;
     // The canvas rect is in logical points for these peers (see
-    // FfiModel._getDisplaysRect) but the decoded frame is in physical pixels, so
-    // the painted size has to be divided back down by the display scale. The
-    // condition must match _getDisplaysRect exactly, hence the display count.
+    // FfiModel._getDisplaysRect) but the decoded frame is in physical pixels,
+    // so the painted size has to be divided back down by the display scale.
+    // The condition must match _getDisplaysRect exactly — session-global, all
+    // peer displays.
     final displays = widget.ffi.ffiModel.pi.getCurDisplays();
-    if (widget.ffi.ffiModel.isPeerLinux ||
-        (widget.ffi.ffiModel.isPeerMacOS && displays.length > 1)) {
+    if (useLogicalDisplayLayout(
+        isPeerLinux: widget.ffi.ffiModel.isPeerLinux,
+        isPeerMacOS: widget.ffi.ffiModel.isPeerMacOS,
+        allDisplayScales:
+            widget.ffi.ffiModel.pi.displays.map((d) => d.scale))) {
       if (displays.isNotEmpty) {
         sizeScale = s / displays[0].scale;
       }
@@ -1212,11 +1217,14 @@ class _ImagePaintState extends State<ImagePaint> {
     if (rect == null) {
       return Container();
     }
-    // See _buildScrollAutoNonTextureRender: the rect is logical, the texture is
-    // physical, so its painted size must be divided by the display scale. The
-    // condition must match _getDisplaysRect exactly, hence the display count.
-    final isScaledPeer = ffiModel.isPeerLinux ||
-        (ffiModel.isPeerMacOS && displays.length > 1);
+    // See _buildScrollAutoNonTextureRender: the rect is logical, the texture
+    // is physical, so its painted size must be divided by the display scale.
+    // The condition must match _getDisplaysRect exactly — session-global, all
+    // peer displays.
+    final isScaledPeer = useLogicalDisplayLayout(
+        isPeerLinux: ffiModel.isPeerLinux,
+        isPeerMacOS: ffiModel.isPeerMacOS,
+        allDisplayScales: ffiModel.pi.displays.map((d) => d.scale));
     final curDisplay = ffiModel.pi.currentDisplay;
     for (var i = 0; i < displays.length; i++) {
       final textureId = widget.ffi.textureModel

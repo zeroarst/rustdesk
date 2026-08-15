@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter_hbb/common/logical_display_layout.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/utils/window_transition.dart';
@@ -192,23 +193,26 @@ class FfiModel with ChangeNotifier {
     if (displays.isEmpty) {
       return null;
     }
-    // macOS reports each display's origin in logical points (CGDisplayBounds) but
-    // its width/height in physical pixels, so a HiDPI screen must be divided by
-    // `scale` to land back in the same coordinate space as the origins. Linux
-    // already needed this for multi-monitor Wayland; macOS needs it whenever more
-    // than one display is streamed, which the server previously prevented by
-    // disabling retina capture for multiple video services.
+    // macOS reports each display's origin in logical points (CGDisplayBounds)
+    // but its width/height in physical pixels. When the peer has a scale-1
+    // display, the Rust side parks the host's current display there so its
+    // Retina shim stays inert (src/display_park.rs), and this rect must then
+    // be fully logical — divide sizes by `scale`. When every display is
+    // scaled there is no parking spot and the legacy info-space rect is kept
+    // (the armed shim divides for us). Linux keeps its unconditional
+    // behaviour.
     //
-    // NOTE: this rect is the cursor/input coordinate space. The video frame is
-    // still delivered in physical pixels, so every site that sizes a frame from
-    // `Display.width/height` must divide by `scale` to match — see the
-    // `isPeerMacOS` branches in desktop/pages/remote_page.dart.
-    //
-    // Only when the rect spans MORE THAN ONE display. A single-display rect
-    // never has to reconcile its size against another display's origin, so it
-    // is already self-consistent in physical pixels and dividing it puts the
-    // pointer at half rate. Linux keeps its unconditional behaviour.
-    if (isPeerLinux || (isPeerMacOS && displays.length > 1)) {
+    // NOTE: this rect is the cursor/input coordinate space. The video frame
+    // is still delivered in physical pixels, so every site that sizes a
+    // frame from `Display.width/height` must divide by `scale` to match —
+    // see the `useLogicalDisplayLayout` call sites in
+    // desktop/pages/remote_page.dart. The predicate runs on ALL peer
+    // displays (`_pi.displays`), not the passed subset: parking is
+    // per-connection state shared by every window.
+    if (useLogicalDisplayLayout(
+        isPeerLinux: isPeerLinux,
+        isPeerMacOS: isPeerMacOS,
+        allDisplayScales: _pi.displays.map((d) => d.scale))) {
       useDisplayScale = true;
     }
     int scale(int len, double s) {
@@ -889,9 +893,11 @@ class FfiModel with ChangeNotifier {
       }
     }
 
-    if (!_pi.isSupportMultiUiSession || _pi.currentDisplay == display) {
-      handleResolutions(peerId, evt['resolutions']);
-    }
+    // Store the list under the display it belongs to even when that display
+    // is not current: with display_idx parking (src/display_park.rs) some
+    // displays only ever announce their resolutions once, and the last
+    // arrival must not clobber another display's list.
+    handleResolutions(peerId, evt['resolutions'], display);
     notifyListeners();
   }
 
@@ -1468,7 +1474,11 @@ class FfiModel with ChangeNotifier {
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
       if (!isCache) {
-        handleResolutions(peerId, evt["resolutions"]);
+        // The connect-time list belongs to the HOST's current display (the
+        // event carries them side by side), not this window's display — a
+        // per-display window joining an existing session has already set
+        // `_pi.currentDisplay` to its own display.
+        handleResolutions(peerId, evt["resolutions"], currentDisplay);
       }
       parent.target?.elevationModel.onPeerInfo(_pi);
     }
@@ -1642,7 +1652,7 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  handleResolutions(String id, dynamic resolutions) {
+  handleResolutions(String id, dynamic resolutions, int display) {
     try {
       final resolutionsObj = json.decode(resolutions as String);
       late List<dynamic> dynamicArray;
@@ -1669,7 +1679,12 @@ class FfiModel with ChangeNotifier {
           return b.height - a.height;
         }
       });
-      _pi.resolutions = arr;
+      _pi.resolutionsMap[display] = arr;
+      // Keep the legacy current-display list in sync for consumers that
+      // cannot name a display (mobile).
+      if (display == _pi.currentDisplay) {
+        _pi.resolutions = arr;
+      }
     } catch (e) {
       debugPrint("Failed to parse resolutions:$e");
     }
@@ -4229,6 +4244,12 @@ class PeerInfo with ChangeNotifier {
   RxList<Display> displays = <Display>[].obs;
   Features features = Features();
   List<Resolution> resolutions = [];
+  // Per-display supported resolutions. `resolutions` above only tracks the
+  // current display and is overwritten by whichever display-changed message
+  // arrived last; with the display_idx parking for macOS peers
+  // (src/display_park.rs) those messages no longer follow every switch, so
+  // consumers that can name a display should read this map instead.
+  Map<int, List<Resolution>> resolutionsMap = {};
   Map<String, dynamic> platformAdditions = {};
 
   RxInt displaysCount = 0.obs;
