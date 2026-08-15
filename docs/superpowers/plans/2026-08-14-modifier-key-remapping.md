@@ -1724,7 +1724,7 @@ Close any other running instance first; the Release exe shares `%APPDATA%\RustDe
 powershell.exe -NoProfile -Command "Get-Process rustdesk -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; Start-Process 'D:\Projects\rustdesk\flutter\build\windows\x64\runner\Release\rustdesk.exe'"
 ```
 
-- [ ] **Step 4: Verify against a macOS peer**
+- [x] **Step 4: Verify against a macOS peer** — all items PASS
 
 Connect to a Mac, open the toolbar's Keyboard menu, choose **Modifier keys…**, click **Mac positional**, and confirm:
 
@@ -1870,6 +1870,35 @@ not the code:**
   **not valid here** either: Select All is bound to `^a`, so Ctrl+A selecting
   all is correct. What that item is really testing — that Ctrl arrives as
   Control and not as Command — is proven by the truth table above.
+
+**PASSED — items 1 and 4, hand-verified by Roy (2026-08-15).**
+
+- **Item 1, the dialog.** Rendered and screenshotted. Header reads "When
+  controlling: Mac OS"; the four rows are exactly `Ctrl -> Control`,
+  `Win -> Option`, `Alt -> Command`, `Shift -> Shift`; the three presets are
+  `No remap`, `Swap Ctrl/Cmd`, `Mac positional`, with Cancel/OK. Rows align,
+  dropdown widths are ample for "Command". Only cosmetic note: the presets wrap
+  onto two rows (`No remap` + `Swap Ctrl/Cmd`, then `Mac positional` alone)
+  rather than fitting one line. Legible, slightly ragged; no change needed.
+- **Item 4, Win+click as Option+click.** Confirmed in Xcode: Win+click shows
+  the Quick Help documentation popover, which is Option+click's behaviour
+  there. This is the one path the keyboard tests could not reach, since the
+  remap is applied separately in the mouse send path.
+
+**Item 6, persistence across restart — already satisfied.** The mapping lives in
+`RustDesk_local.toml`; the client under test was launched at 14:49 and applied
+exactly the saved `Mac positional` table, so it was read from disk at startup.
+
+**PASSED — item 7, all three keyboard modes (hand-verified by Roy).** Ctrl+C,
+Ctrl+V and Ctrl+X all behave identically in **Legacy**, **Map** and
+**Translate** modes. This is the check that mattered most after Task 3, which
+threaded the remap through both the modern and the legacy code paths.
+
+**Still open after this round:**
+
+- Step 6 — mid-hold safety: hold Alt, switch the dialog to "No remap" while
+  still holding, release, then type a plain letter and confirm it produces the
+  letter rather than a shortcut.
 
 **Step 5 (AltGr) — WAIVED by the user, 2026-08-15.** Roy does not use UK,
 German or any other layout that has an AltGr key, and has no Windows peer
