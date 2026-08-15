@@ -1736,7 +1736,7 @@ Connect to a Mac, open the toolbar's Keyboard menu, choose **Modifier keys…**,
 6. Reopening the dialog shows the saved mapping, and it persists across a restart of the app.
 7. Repeat 2 and 5 with the keyboard mode set to Legacy mode, then Map mode, then Translate mode, from the same Keyboard menu.
 
-- [ ] **Step 5: Verify the AltGr regression**
+- [~] **Step 5: Verify the AltGr regression** — WAIVED, see below
 
 Connect to a **Windows** peer with a layout that has AltGr (for example UK or German) and a mapping active that remaps Ctrl. Type `AltGr+4` (UK: `€`) into Notepad on the peer and confirm the character appears. If a bare Ctrl arrives instead, the `0xE0` guard in `is_altgr_synthetic_ctrl` is not firing — check `event.position_code` at the call site.
 
@@ -1788,6 +1788,102 @@ modifier-remap = '{"macos":{"alt":"alt","ctrl":"meta","meta":"ctrl","shift":"shi
   AltGr, such as UK or German. Not available in this environment.
 - The dialog's visual layout has never been rendered — row alignment, dropdown
   width, and whether the three preset buttons wrap sensibly are all unconfirmed.
+
+---
+
+## Verification round 2 (2026-08-15) — mapping verified end-to-end
+
+Session to `192.168.1.117` (stats-macbook-pro) connected this time. The active
+config is now the **Mac positional** preset, not the migrated one:
+
+```toml
+modifier-remap = '{"macos":{"ctrl":"ctrl","meta":"alt","alt":"meta","shift":"shift"}}'
+```
+
+**Measurement rig (all objective, no eyeballing).** `/tmp/flags` on the Mac
+(compiled Swift) prints `CGEventSource.flagsState(.combinedSessionState)` plus
+the frontmost app name, read over the SSH control master.
+`D:\dev\setup\rd-key.ps1` focuses the RustDesk session window, **verifies it is
+foreground, and injects nothing if it is not** — so test keystrokes can never
+leak into other applications. Target was a scratch TextEdit document, never a
+real one.
+
+**PASSED — the mapping itself, measured directly and repeatedly:**
+
+| Windows key | Expected on Mac | Measured | Release |
+| --- | --- | --- | --- |
+| Shift | shift | shift | clean |
+| Ctrl | control | control | clean |
+| Alt | command | command | clean |
+| Win | option | option | clean |
+
+Run twice, ~20 minutes apart, identical both times. No modifier ever stuck
+(`mods=none` after every release, on both machines). This covers plan item 5
+(Ctrl still arrives as Control, not Command) at the mechanism level.
+
+**PASSED — plan item 3, Alt+Tab:** Mac frontmost went `TextEdit → Xcode`
+(Cmd+Tab fired) while the Windows foreground window stayed on the RustDesk
+session — so it did **not** trigger a local Alt+Tab.
+
+**PASSED — Alt+letter reaching the Mac as Cmd+letter:** Alt+A selected the whole
+document (confirmed twice — visible selection highlight, then a subsequent
+plain keystroke replaced the entire selected contents).
+
+**RESOLVED — what first looked like an anomaly was the peer's own key bindings.**
+Mid-session, Alt+A / Alt+C / Alt+Z went inert while plain letters still typed and
+the modifier truth table still measured correct. That was **not** a client bug.
+This Mac remaps the common editing actions off Command and onto Control, via
+App Shortcuts (`defaults read -g NSUserKeyEquivalents`):
+
+```
+Copy = ^c   Paste = ^v   Cut = ^x   Select All = ^a
+Undo = ^z   Redo = ^$z   Save = ^s  Find = ^f   New Window = ^n
+```
+
+plus `~/Library/KeyBindings/DefaultKeyBinding.dict` (symlinked to
+`Projects/setup/macos/DefaultKeyBinding.dict`) binding `^z`/`^$z`/`^\U007F` by
+selector. So on this peer **Cmd+C is bound to nothing** and Alt+C doing nothing
+is the correct outcome. The timing fits exactly: those bindings were being
+edited in another session while this run was in progress (the dict was linked
+at 21:18, mid-test), which is why Cmd+A worked early and stopped later.
+
+**PASSED — end-to-end, against the bindings this peer actually uses.** With the
+remap active, Windows `Ctrl+key` arrives as Mac `Control+key` and fires the
+rebound menu actions. Verified by clipboard round-trip on a scratch document:
+
+| Sent from Windows | Arrives as | Rebound action | Result |
+| --- | --- | --- | --- |
+| Ctrl+A | Control+A | Select All | selected |
+| Ctrl+C | Control+C | Copy | clipboard became the document text |
+| Ctrl+V | Control+V | Paste | document became the clipboard text |
+
+Read back with a fresh sentinel each time, so neither direction can be a stale
+clipboard.
+
+**Two plan steps are written against assumptions this peer breaks — fix the plan,
+not the code:**
+
+- Step 4 item 2 ("Alt+C performs a copy") is **not valid here**: Copy is `^c`,
+  so Alt+C correctly does nothing. The equivalent check on this machine is
+  Ctrl+C, which passes.
+- Step 4 item 5 ("Ctrl+A moves to line start rather than selecting all") is
+  **not valid here** either: Select All is bound to `^a`, so Ctrl+A selecting
+  all is correct. What that item is really testing — that Ctrl arrives as
+  Control and not as Command — is proven by the truth table above.
+
+**Step 5 (AltGr) — WAIVED by the user, 2026-08-15.** Roy does not use UK,
+German or any other layout that has an AltGr key, and has no Windows peer
+running one, so this check will not be performed. Keep the guard itself: the
+`0xE0` check in `is_altgr_synthetic_ctrl` exists because on those layouts
+AltGr arrives as a synthetic Ctrl that must not be remapped, and the code is
+still correct for users who do have such a layout. If it ever needs testing,
+the check is: on a UK/German **Windows** peer with a mapping that remaps Ctrl,
+type `AltGr+4` into Notepad and confirm `€` appears rather than a bare Ctrl.
+
+**Unrelated observation:** the peer's BetterDisplay layout has changed since the
+cursor work — all three displays now report `scale=1.0` (the U3415W virtual
+display is no longer 2x). The Retina shim is therefore inert on this peer right
+now, so this session exercised none of the cursor-fix parking logic.
 
 ---
 
