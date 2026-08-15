@@ -1223,7 +1223,18 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 pub fn main_set_local_option(key: String, value: String) {
     let is_texture_render_key = key.eq(config::keys::OPTION_TEXTURE_RENDER);
     let is_d3d_render_key = key.eq(config::keys::OPTION_ALLOW_D3D_RENDER);
+    let is_modifier_remap_key = key.eq(crate::modifier_remap::OPTION_MODIFIER_REMAP);
+    if is_modifier_remap_key {
+        // Release anything currently held *under the old mapping*, before the
+        // new one takes effect. Otherwise a change mid-keypress would send the
+        // press of one target and the release of another, stranding a modifier
+        // down on the peer.
+        crate::keyboard::release_remote_keys("map");
+    }
     set_local_option(key, value.clone());
+    if is_modifier_remap_key {
+        crate::modifier_remap::invalidate_cache();
+    }
     let is_render_target =
         |session: &crate::flutter::FlutterSession| session.is_default() || session.is_view_camera();
     if is_texture_render_key {

@@ -1204,29 +1204,13 @@ List<TToggleMenu> toolbarPrivacyMode(
 
 List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
   final ffiModel = ffi.ffiModel;
-  final pi = ffiModel.pi;
   final sessionId = ffi.sessionId;
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
   List<TToggleMenu> v = [];
 
-  // swap key
-  if (ffiModel.keyboard &&
-      ((isMacOS && pi.platform != kPeerPlatformMacOS) ||
-          (!isMacOS && pi.platform == kPeerPlatformMacOS))) {
-    final option = 'allow_swap_key';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
-    onChanged(bool? value) {
-      if (value == null) return;
-      bind.sessionToggleOption(sessionId: sessionId, value: option);
-    }
-
-    final enabled = !ffi.ffiModel.viewOnly;
-    v.add(TToggleMenu(
-        value: value,
-        onChanged: enabled ? onChanged : null,
-        child: Text(translate('Swap control-command key'))));
-  }
+  // Modifier remapping replaced the old "Swap control-command key" checkbox.
+  // It is configured from the Keyboard menu's "Modifier keys..." entry, which
+  // writes the global `modifier-remap` option.
 
   // Relative mouse mode (gaming mode).
   // Only show when server supports MOUSE_TYPE_MOVE_RELATIVE (version >= 1.4.5)

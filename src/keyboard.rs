@@ -346,6 +346,7 @@ pub mod client {
     }
 
     pub fn get_modifiers_state(
+        remap: &crate::modifier_remap::ModifierMap,
         alt: bool,
         ctrl: bool,
         shift: bool,
@@ -365,7 +366,7 @@ pub mod client {
             || *modifiers_lock.get(&Key::AltGr).unwrap()
             || alt;
 
-        (alt, ctrl, shift, command)
+        remap.map_state(alt, ctrl, shift, command)
     }
 
     pub fn legacy_modifiers(
@@ -937,6 +938,48 @@ fn update_modifiers_state(event: &Event) {
     };
 }
 
+/// Rewrites a modifier key in *local* key space, recomputing the platform
+/// codes so the downstream per-peer translation tables see a coherent event.
+fn remap_event(remap: &crate::modifier_remap::ModifierMap, event: &Event) -> Event {
+    let (key, is_press) = match event.event_type {
+        EventType::KeyPress(k) => (k, true),
+        EventType::KeyRelease(k) => (k, false),
+        _ => return event.clone(),
+    };
+    let mapped = remap.map_key(key, event.position_code as _);
+    if mapped == key {
+        return event.clone();
+    }
+
+    let mut e = event.clone();
+    e.event_type = if is_press {
+        EventType::KeyPress(mapped)
+    } else {
+        EventType::KeyRelease(mapped)
+    };
+    // Modifiers never carry text; a stale unicode payload would confuse
+    // translate mode.
+    e.unicode = None;
+    e.usb_hid = rdev::usb_hid_keycode_from_key(mapped).unwrap_or(e.usb_hid);
+
+    #[cfg(target_os = "windows")]
+    {
+        e.position_code = rdev::win_scancode_from_key(mapped).unwrap_or(e.position_code);
+        e.platform_code = rdev::win_code_from_key(mapped).unwrap_or(e.platform_code);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        e.platform_code = rdev::macos_keycode_from_key(mapped).unwrap_or(e.platform_code as _) as _;
+        e.position_code = e.platform_code;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        e.position_code = rdev::linux_keycode_from_key(mapped).unwrap_or(e.position_code);
+        e.platform_code = e.position_code;
+    }
+    e
+}
+
 pub fn event_to_key_events(
     mut peer: String,
     event: &Event,
@@ -957,6 +1000,19 @@ pub fn event_to_key_events(
         _ => {}
     }
 
+    // The remap runs *after* `update_modifiers_state` and the `TO_RELEASE`
+    // bookkeeping above, so both keep tracking real local keys. Releases
+    // replayed out of `TO_RELEASE` come back through here and are remapped
+    // identically, so press/release stay paired.
+    let remap = crate::modifier_remap::for_peer(peer.as_str());
+    let remapped;
+    let event = if remap.is_identity() {
+        event
+    } else {
+        remapped = remap_event(&remap, event);
+        &remapped
+    };
+
     let mut key_event = KeyEvent::new();
     key_event.mode = keyboard_mode.into();
 
@@ -966,7 +1022,7 @@ pub fn event_to_key_events(
         _ => {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
-                legacy_keyboard_mode(event, key_event)
+                legacy_keyboard_mode(peer.as_str(), event, key_event)
             }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             {
@@ -1015,7 +1071,7 @@ pub fn get_peer_platform() -> String {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEvent> {
+pub fn legacy_keyboard_mode(peer: &str, event: &Event, mut key_event: KeyEvent) -> Vec<KeyEvent> {
     let mut events = Vec::new();
     // legacy mode(0): Generate characters locally, look for keycode on other side.
     let (mut key, down_or_up) = match event.event_type {
@@ -1026,8 +1082,10 @@ pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEv
         }
     };
 
-    let peer = get_peer_platform();
-    let is_win = peer == "Windows";
+    // `peer` is already lowercased and whitespace-stripped by the caller.
+    // Previously this re-derived it via `get_peer_platform()`, which returns
+    // the *current* session and is wrong when several session windows are open.
+    let is_win = peer == OS_LOWER_WINDOWS;
     if is_win {
         key = convert_numpad_keys(key);
     }
@@ -1233,7 +1291,8 @@ pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEv
             return events;
         }
     }
-    let (alt, ctrl, shift, command) = client::get_modifiers_state(alt, ctrl, shift, command);
+    let remap = crate::modifier_remap::for_peer(peer);
+    let (alt, ctrl, shift, command) = client::get_modifiers_state(&remap, alt, ctrl, shift, command);
     client::legacy_modifiers(&mut key_event, alt, ctrl, shift, command);
 
     if down_or_up == true {
@@ -1283,7 +1342,9 @@ fn windows_peer_special_key(peer: &str, event: &Event) -> Option<KeyEvent> {
     key_event.mode = KeyboardMode::Legacy.into();
     key_event.down = down;
     key_event.set_control_key(ControlKey::Pause);
-    let (alt, ctrl, shift, command) = client::get_modifiers_state(false, false, false, false);
+    let remap = crate::modifier_remap::for_peer(peer);
+    let (alt, ctrl, shift, command) =
+        client::get_modifiers_state(&remap, false, false, false, false);
     client::legacy_modifiers(&mut key_event, alt, ctrl, shift, command);
     Some(key_event)
 }
@@ -1637,5 +1698,97 @@ pub mod input_source {
                 CONFIG_INPUT_SOURCE_2_TIP.to_string(),
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod remap_tests {
+    use super::*;
+    use crate::modifier_remap::{ModifierMap, Slot};
+
+    fn mac_positional() -> ModifierMap {
+        let mut m = ModifierMap::identity();
+        m.set(Slot::Meta, Slot::Alt);
+        m.set(Slot::Alt, Slot::Meta);
+        m
+    }
+
+    fn key_event(key: Key, position_code: u32, platform_code: u32) -> Event {
+        Event {
+            time: std::time::SystemTime::now(),
+            unicode: None,
+            event_type: EventType::KeyPress(key),
+            platform_code,
+            position_code,
+            usb_hid: 0,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            extra_data: 0,
+        }
+    }
+
+    fn pressed_key(event: &Event) -> Option<Key> {
+        match event.event_type {
+            EventType::KeyPress(k) => Some(k),
+            EventType::KeyRelease(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn identity_map_returns_the_event_untouched() {
+        let e = key_event(Key::MetaLeft, 0xE05B, 0x5B);
+        let out = remap_event(&ModifierMap::identity(), &e);
+        assert_eq!(pressed_key(&out), Some(Key::MetaLeft));
+        assert_eq!(out.position_code, e.position_code);
+        assert_eq!(out.platform_code, e.platform_code);
+    }
+
+    #[test]
+    fn remapped_event_carries_the_new_key_and_recomputed_codes() {
+        let e = key_event(Key::MetaLeft, 0xE05B, 0x5B);
+        let out = remap_event(&mac_positional(), &e);
+        assert_eq!(pressed_key(&out), Some(Key::Alt));
+        // Codes must be recomputed for the LOCAL platform, so downstream
+        // per-peer translation tables see a coherent Alt event.
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                out.position_code,
+                rdev::win_scancode_from_key(Key::Alt).unwrap()
+            );
+            assert_eq!(out.platform_code, rdev::win_code_from_key(Key::Alt).unwrap());
+        }
+        assert_ne!(out.position_code, e.position_code);
+    }
+
+    #[test]
+    fn release_is_remapped_the_same_way_as_press() {
+        let mut e = key_event(Key::Alt, 0x38, 0x12);
+        e.event_type = EventType::KeyRelease(Key::Alt);
+        let out = remap_event(&mac_positional(), &e);
+        assert!(matches!(out.event_type, EventType::KeyRelease(Key::MetaLeft)));
+    }
+
+    #[test]
+    fn altgr_survives_the_pipeline() {
+        let mut m = mac_positional();
+        m.set(Slot::Ctrl, Slot::Meta);
+        // Physical right Alt.
+        let e = key_event(Key::AltGr, 0xE038, 0xA5);
+        assert_eq!(pressed_key(&remap_event(&m, &e)), Some(Key::AltGr));
+        // The synthetic ControlLeft Windows injects ahead of it.
+        let e = key_event(Key::ControlLeft, 0xE01D, 0x11);
+        assert_eq!(pressed_key(&remap_event(&m, &e)), Some(Key::ControlLeft));
+    }
+
+    #[test]
+    fn non_key_events_pass_through() {
+        let mut e = key_event(Key::Alt, 0x38, 0x12);
+        e.event_type = EventType::Wheel {
+            delta_x: 0,
+            delta_y: 1,
+        };
+        let out = remap_event(&mac_positional(), &e);
+        assert!(matches!(out.event_type, EventType::Wheel { .. }));
     }
 }

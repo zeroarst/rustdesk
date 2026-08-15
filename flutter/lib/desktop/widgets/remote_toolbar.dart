@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
+import 'package:flutter_hbb/common/widgets/modifier_remap_dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -2410,6 +2411,7 @@ class _KeyboardMenu extends StatelessWidget {
         menuChildrenGetter: (_) => [
               keyboardMode(),
               localKeyboardType(),
+              modifierKeys(),
               inputSource(),
               Divider(),
               viewMode(),
@@ -2521,6 +2523,19 @@ class _KeyboardMenu extends StatelessWidget {
               : null,
         )
       ],
+    );
+  }
+
+  modifierKeys() {
+    if (!ffi.ffiModel.keyboard) return Offstage();
+    final enabled = !ffi.ffiModel.viewOnly;
+    return MenuButton(
+      child: Text(translate('Modifier keys')),
+      trailingIcon: const Icon(Icons.settings),
+      ffi: ffi,
+      onPressed: enabled
+          ? () => showModifierRemapDialog(pi.platform, ffi.dialogManager)
+          : null,
     );
   }
 

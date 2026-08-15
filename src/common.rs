@@ -128,6 +128,7 @@ pub fn global_init() -> bool {
             crate::server::wayland::init();
         }
     }
+    crate::modifier_remap::migrate_from_allow_swap_key();
     true
 }
 

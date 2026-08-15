@@ -697,88 +697,15 @@ impl<T: InvokeUiSession> Session<T> {
         return "".to_owned();
     }
 
-    pub fn swap_modifier_key(&self, msg: &mut KeyEvent) {
-        let allow_swap_key = self.get_toggle_option("allow_swap_key".to_string());
-        if allow_swap_key {
-            if let Some(key_event::Union::ControlKey(ck)) = msg.union {
-                let ck = ck.enum_value_or_default();
-                let ck = match ck {
-                    ControlKey::Control => ControlKey::Meta,
-                    ControlKey::Meta => ControlKey::Control,
-                    ControlKey::RControl => ControlKey::Meta,
-                    ControlKey::RWin => ControlKey::Control,
-                    _ => ck,
-                };
-                msg.set_control_key(ck);
-            }
-            msg.modifiers = msg
-                .modifiers
-                .iter()
-                .map(|ck| {
-                    let ck = ck.enum_value_or_default();
-                    let ck = match ck {
-                        ControlKey::Control => ControlKey::Meta,
-                        ControlKey::Meta => ControlKey::Control,
-                        ControlKey::RControl => ControlKey::Meta,
-                        ControlKey::RWin => ControlKey::Control,
-                        _ => ck,
-                    };
-                    hbb_common::protobuf::EnumOrUnknown::new(ck)
-                })
-                .collect();
-
-            let code = msg.chr();
-            if code != 0 {
-                let mut peer = self.peer_platform().to_lowercase();
-                peer.retain(|c| !c.is_whitespace());
-
-                let key = match peer.as_str() {
-                    "windows" => {
-                        let key = rdev::win_key_from_scancode(code);
-                        let key = match key {
-                            rdev::Key::ControlLeft => rdev::Key::MetaLeft,
-                            rdev::Key::MetaLeft => rdev::Key::ControlLeft,
-                            rdev::Key::ControlRight => rdev::Key::MetaLeft,
-                            rdev::Key::MetaRight => rdev::Key::ControlLeft,
-                            _ => key,
-                        };
-                        rdev::win_scancode_from_key(key).unwrap_or_default()
-                    }
-                    "macos" => {
-                        let key = rdev::macos_key_from_code(code as _);
-                        let key = match key {
-                            rdev::Key::ControlLeft => rdev::Key::MetaLeft,
-                            rdev::Key::MetaLeft => rdev::Key::ControlLeft,
-                            rdev::Key::ControlRight => rdev::Key::MetaLeft,
-                            rdev::Key::MetaRight => rdev::Key::ControlLeft,
-                            _ => key,
-                        };
-                        rdev::macos_keycode_from_key(key).unwrap_or_default() as _
-                    }
-                    _ => {
-                        let key = rdev::linux_key_from_code(code);
-                        let key = match key {
-                            rdev::Key::ControlLeft => rdev::Key::MetaLeft,
-                            rdev::Key::MetaLeft => rdev::Key::ControlLeft,
-                            rdev::Key::ControlRight => rdev::Key::MetaLeft,
-                            rdev::Key::MetaRight => rdev::Key::ControlLeft,
-                            _ => key,
-                        };
-                        rdev::linux_keycode_from_key(key).unwrap_or_default()
-                    }
-                };
-                msg.set_chr(key);
-            }
-        }
-    }
-
     pub fn send_key_event(&self, evt: &KeyEvent) {
         // mode: legacy(0), map(1), translate(2), auto(3)
-
-        let mut msg = evt.clone();
-        self.swap_modifier_key(&mut msg);
+        //
+        // Modifier remapping happens upstream in `keyboard::event_to_key_events`,
+        // in local key space. Events built directly here (the on-screen modifier
+        // buttons on mobile, `ctrl_alt_del`, `lock_screen`) are explicit semantic
+        // requests and are deliberately NOT remapped.
         let mut msg_out = Message::new();
-        msg_out.set_key_event(msg);
+        msg_out.set_key_event(evt.clone());
         self.send(Data::Message(msg_out));
     }
 
@@ -1246,8 +1173,15 @@ impl<T: InvokeUiSession> Session<T> {
         };
 
         // #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        //
+        // The modifier remap is applied here, to the held-modifier state, and
+        // NOT to the resulting `MouseEvent.modifiers` further down in
+        // `send_mouse`. Doing both would remap twice.
+        let mut peer = self.peer_platform().to_lowercase();
+        peer.retain(|c| !c.is_whitespace());
+        let remap = crate::modifier_remap::for_peer(&peer);
         let (alt, ctrl, shift, command) =
-            keyboard::client::get_modifiers_state(alt, ctrl, shift, command);
+            keyboard::client::get_modifiers_state(&remap, alt, ctrl, shift, command);
         let is_left = (mask & (MOUSE_BUTTON_LEFT << 3)) > 0;
         let is_right = (mask & (MOUSE_BUTTON_RIGHT << 3)) > 0;
         if is_left ^ is_right {
@@ -1933,27 +1867,6 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             });
             handle_test_delay(t, peer).await;
         }
-    }
-
-    fn swap_modifier_mouse(&self, msg: &mut hbb_common::protos::message::MouseEvent) {
-        let allow_swap_key = self.get_toggle_option("allow_swap_key".to_string());
-        if allow_swap_key {
-            msg.modifiers = msg
-                .modifiers
-                .iter()
-                .map(|ck| {
-                    let ck = ck.enum_value_or_default();
-                    let ck = match ck {
-                        ControlKey::Control => ControlKey::Meta,
-                        ControlKey::Meta => ControlKey::Control,
-                        ControlKey::RControl => ControlKey::Meta,
-                        ControlKey::RWin => ControlKey::Control,
-                        _ => ck,
-                    };
-                    hbb_common::protobuf::EnumOrUnknown::new(ck)
-                })
-                .collect();
-        };
     }
 }
 
