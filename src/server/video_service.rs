@@ -1187,8 +1187,24 @@ fn handle_one_frame(
             if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
-                    encoder.disable();
-                    log::error!("switch due to encoding fails, first frame: {first}, error: {e:?}");
+                    // Hardware encoders (VideoToolbox especially) fail in
+                    // transient bursts; a fresh encoder session usually
+                    // recovers. Only disable the hardware path for good when
+                    // fresh sessions keep dying within the strike window.
+                    let disable = register_hw_encode_strike(
+                        &mut HW_ENCODE_STRIKES.lock().unwrap(),
+                        Instant::now(),
+                    );
+                    if disable {
+                        encoder.disable();
+                        log::error!(
+                            "switch due to encoding fails, first frame: {first}, error: {e:?}"
+                        );
+                    } else {
+                        log::error!(
+                            "recreate hardware encoder after encode fails, first frame: {first}, error: {e:?}"
+                        );
+                    }
                     bail!("SWITCH");
                 }
             }
@@ -1423,5 +1439,95 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+/// How many consecutive fail-bursts get a fresh encoder session before the
+/// hardware path is disabled for the rest of the process. VideoToolbox
+/// returns transient "no valid frame" bursts that a fresh session survives.
+const MAX_HW_ENCODE_RECREATES: usize = 3;
+/// A strike older than this is forgiven: the next burst is a new incident.
+const HW_ENCODE_STRIKE_WINDOW: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Default)]
+struct HwEncoderStrikes {
+    count: usize,
+    last: Option<Instant>,
+}
+
+lazy_static::lazy_static! {
+    static ref HW_ENCODE_STRIKES: Mutex<HwEncoderStrikes> = Default::default();
+}
+
+/// Record one encode-failure burst. Returns true when the hardware encoder
+/// should be permanently disabled (fresh sessions keep failing), false when
+/// it should simply be recreated.
+fn register_hw_encode_strike(strikes: &mut HwEncoderStrikes, now: Instant) -> bool {
+    if let Some(last) = strikes.last {
+        if now.saturating_duration_since(last) > HW_ENCODE_STRIKE_WINDOW {
+            strikes.count = 0;
+        }
+    }
+    strikes.count += 1;
+    strikes.last = Some(now);
+    if strikes.count > MAX_HW_ENCODE_RECREATES {
+        *strikes = Default::default();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod hw_encode_strike_tests {
+    use super::*;
+
+    fn s() -> HwEncoderStrikes {
+        Default::default()
+    }
+
+    #[test]
+    fn first_strike_recreates() {
+        let mut st = s();
+        assert!(!register_hw_encode_strike(&mut st, Instant::now()));
+    }
+
+    #[test]
+    fn strikes_within_window_accumulate_until_disable() {
+        let mut st = s();
+        let t0 = Instant::now();
+        assert!(!register_hw_encode_strike(&mut st, t0));
+        assert!(!register_hw_encode_strike(&mut st, t0 + Duration::from_secs(1)));
+        assert!(!register_hw_encode_strike(&mut st, t0 + Duration::from_secs(2)));
+        // 4th rapid strike: fresh encoders keep dying -> permanently disable
+        assert!(register_hw_encode_strike(&mut st, t0 + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn old_strikes_are_forgiven() {
+        let mut st = s();
+        let t0 = Instant::now();
+        for i in 0..3 {
+            assert!(!register_hw_encode_strike(&mut st, t0 + Duration::from_secs(i)));
+        }
+        // long quiet stretch: the next flake is a new incident, not strike 4
+        let t1 = t0 + HW_ENCODE_STRIKE_WINDOW + Duration::from_secs(10);
+        assert!(!register_hw_encode_strike(&mut st, t1));
+        // and the count restarted: two more rapid strikes still tolerated
+        assert!(!register_hw_encode_strike(&mut st, t1 + Duration::from_secs(1)));
+        assert!(!register_hw_encode_strike(&mut st, t1 + Duration::from_secs(2)));
+        assert!(register_hw_encode_strike(&mut st, t1 + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn disable_resets_the_count() {
+        let mut st = s();
+        let t0 = Instant::now();
+        for i in 0..3 {
+            assert!(!register_hw_encode_strike(&mut st, t0 + Duration::from_secs(i)));
+        }
+        assert!(register_hw_encode_strike(&mut st, t0 + Duration::from_secs(3)));
+        // after a disable the state starts over
+        assert!(!register_hw_encode_strike(&mut st, t0 + Duration::from_secs(4)));
     }
 }
