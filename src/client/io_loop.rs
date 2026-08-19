@@ -1186,12 +1186,6 @@ impl<T: InvokeUiSession> Remote<T> {
             custom_fps = 30;
         }
         let inactive_threshold = 15;
-        let max_queue_len = self
-            .video_threads
-            .iter()
-            .map(|v| v.1.video_queue.read().unwrap().len())
-            .max()
-            .unwrap_or_default();
         let min_decode_fps = self
             .video_threads
             .iter()
@@ -1212,42 +1206,19 @@ impl<T: InvokeUiSession> Remote<T> {
         }
         let last_auto_fps = self.handler.lc.read().unwrap().last_auto_fps.clone();
         let displays = self.video_threads.keys().cloned().collect::<Vec<_>>();
-        let mut fps_trending = |display: usize| {
+        let mut fps_trending = |display: usize| -> Option<FpsTrend> {
             let thread = self.video_threads.get_mut(&display)?;
             let ctl = &mut thread.fps_control;
-            let len = thread.video_queue.read().unwrap().len();
-            let decode_fps = thread.decode_fps.read().unwrap().clone()?;
-            let last_auto_fps = last_auto_fps.clone().unwrap_or(custom_fps as _);
             if ctl.inactive_counter > inactive_threshold {
                 return None;
             }
-            if len > 1 && last_auto_fps > limited_fps || len > std::cmp::max(1, decode_fps / 2) {
-                ctl.idle_counter = 0;
-                return Some(false);
-            }
-            if len <= 1 {
-                ctl.idle_counter += 1;
-                if ctl.idle_counter > 3 && last_auto_fps + 3 <= limited_fps {
-                    return Some(true);
-                }
-            }
-            if len > 1 {
-                ctl.idle_counter = 0;
-            }
-            None
+            let len = thread.video_queue.read().unwrap().len();
+            let decode_fps = thread.decode_fps.read().unwrap().clone()?;
+            let last_auto_fps = last_auto_fps.clone().unwrap_or(custom_fps as _);
+            display_fps_trend(ctl, len, decode_fps, last_auto_fps, limited_fps)
         };
         let trendings: Vec<_> = displays.iter().map(|k| fps_trending(*k)).collect();
-        let should_decrease = trendings.iter().any(|v| *v == Some(false));
-        let should_increase = !should_decrease && trendings.iter().any(|v| *v == Some(true));
-        if last_auto_fps.is_none() || should_decrease || should_increase {
-            // limited_fps to ensure decoding is faster than encoding
-            let mut auto_fps = limited_fps;
-            if should_decrease && limited_fps < max_queue_len {
-                auto_fps = limited_fps / 2;
-            }
-            if auto_fps < 1 {
-                auto_fps = 1;
-            }
+        if let Some(auto_fps) = decide_auto_fps(&trendings, last_auto_fps.clone(), limited_fps) {
             if Some(auto_fps) != last_auto_fps {
                 let mut misc = Misc::new();
                 misc.set_option(OptionMessage {
@@ -2534,6 +2505,87 @@ struct FpsControl {
     last_refresh_instant: Option<Instant>,
     idle_counter: usize,
     inactive_counter: usize,
+    bad_counter: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FpsTrend {
+    /// Runaway backlog (>0.5s of frames queued): cut hard, immediately.
+    DecreaseHard,
+    /// Persistent backlog over several seconds: trim gently.
+    DecreaseSoft,
+    /// Queue has stayed drained and there is headroom: raise fps.
+    Increase,
+}
+
+/// Consecutive over-queue seconds required before a soft decrease.
+/// One bad second is a Wi-Fi/scheduler blip; reacting to it causes the
+/// visible fps sawtooth this hysteresis exists to remove.
+const BAD_SECONDS_BEFORE_DECREASE: usize = 3;
+/// Consecutive drained seconds required before raising fps again.
+const IDLE_SECONDS_BEFORE_INCREASE: usize = 3;
+
+/// Per-display fps trend with hysteresis. Pure over its inputs plus the
+/// counters in `ctl`; called once per display per second.
+fn display_fps_trend(
+    ctl: &mut FpsControl,
+    queue_len: usize,
+    decode_fps: usize,
+    last_auto_fps: usize,
+    limited_fps: usize,
+) -> Option<FpsTrend> {
+    // More than half a second of frames queued: decoding genuinely cannot
+    // keep up, react now rather than after the hysteresis window.
+    if queue_len > std::cmp::max(2, decode_fps / 2) {
+        ctl.idle_counter = 0;
+        ctl.bad_counter += 1;
+        return Some(FpsTrend::DecreaseHard);
+    }
+    let oversubscribed = last_auto_fps > limited_fps && queue_len > 1;
+    let backlog = queue_len > std::cmp::max(2, decode_fps / 8);
+    if backlog || oversubscribed {
+        ctl.idle_counter = 0;
+        ctl.bad_counter += 1;
+        if ctl.bad_counter >= BAD_SECONDS_BEFORE_DECREASE {
+            return Some(FpsTrend::DecreaseSoft);
+        }
+        return None; // tolerate the blip
+    }
+    ctl.bad_counter = 0;
+    if queue_len <= 1 {
+        ctl.idle_counter += 1;
+        if ctl.idle_counter >= IDLE_SECONDS_BEFORE_INCREASE && last_auto_fps + 3 <= limited_fps {
+            return Some(FpsTrend::Increase);
+        }
+    } else {
+        ctl.idle_counter = 0;
+    }
+    None
+}
+
+/// Session-level fps decision from all displays' trends.
+/// `None` means "leave the current fps alone".
+fn decide_auto_fps(
+    trendings: &[Option<FpsTrend>],
+    last_auto_fps: Option<usize>,
+    limited_fps: usize,
+) -> Option<usize> {
+    let hard = trendings.iter().any(|t| *t == Some(FpsTrend::DecreaseHard));
+    let soft = trendings.iter().any(|t| *t == Some(FpsTrend::DecreaseSoft));
+    let increase = trendings.iter().any(|t| *t == Some(FpsTrend::Increase));
+    let fps = if last_auto_fps.is_none() {
+        // First run: align the request to measured decode capacity.
+        limited_fps
+    } else if hard {
+        limited_fps / 2
+    } else if soft {
+        limited_fps * 3 / 4
+    } else if increase {
+        limited_fps
+    } else {
+        return None;
+    };
+    Some(std::cmp::max(1, fps))
 }
 
 struct VideoThread {
@@ -2549,5 +2601,168 @@ impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
         *self.discard_queue.write().unwrap() = true;
+    }
+}
+
+#[cfg(test)]
+mod fps_control_tests {
+    use super::*;
+
+    const DECODE: usize = 60; // frames/s the client proved it can decode
+    const LIMITED: usize = 54; // decode * 9/10, capped by custom fps
+
+    fn ctl() -> FpsControl {
+        FpsControl::default()
+    }
+
+    // --- display_fps_trend: per-display hysteresis ---
+
+    #[test]
+    fn single_bad_second_is_tolerated() {
+        let mut c = ctl();
+        // 10 queued frames is a backlog, but only for one second: a Wi-Fi blip.
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+    }
+
+    #[test]
+    fn persistent_backlog_trims() {
+        let mut c = ctl();
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+        assert_eq!(
+            display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED),
+            Some(FpsTrend::DecreaseSoft)
+        );
+    }
+
+    #[test]
+    fn good_second_resets_persistence() {
+        let mut c = ctl();
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+        // queue drained: forget the streak
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, LIMITED, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, LIMITED, LIMITED), None);
+    }
+
+    #[test]
+    fn runaway_backlog_cuts_immediately() {
+        let mut c = ctl();
+        // more than half a second of frames queued: react now, not in 3s
+        assert_eq!(
+            display_fps_trend(&mut c, DECODE / 2 + 1, DECODE, LIMITED, LIMITED),
+            Some(FpsTrend::DecreaseHard)
+        );
+    }
+
+    #[test]
+    fn oversubscribed_counts_as_bad() {
+        let mut c = ctl();
+        // asked for 60 but can only decode enough for 40: any queue is bad
+        assert_eq!(display_fps_trend(&mut c, 2, DECODE, 60, 40), None);
+        assert_eq!(display_fps_trend(&mut c, 2, DECODE, 60, 40), None);
+        assert_eq!(
+            display_fps_trend(&mut c, 2, DECODE, 60, 40),
+            Some(FpsTrend::DecreaseSoft)
+        );
+    }
+
+    #[test]
+    fn sustained_idle_with_headroom_increases() {
+        let mut c = ctl();
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, 30, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 1, DECODE, 30, LIMITED), None);
+        assert_eq!(
+            display_fps_trend(&mut c, 0, DECODE, 30, LIMITED),
+            Some(FpsTrend::Increase)
+        );
+    }
+
+    #[test]
+    fn idle_without_headroom_no_increase() {
+        let mut c = ctl();
+        for _ in 0..10 {
+            assert_eq!(display_fps_trend(&mut c, 0, DECODE, LIMITED, LIMITED), None);
+        }
+    }
+
+    #[test]
+    fn bad_second_resets_idle_progress() {
+        let mut c = ctl();
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, 30, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, 30, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 10, DECODE, 30, LIMITED), None);
+        // idle streak must rebuild from zero
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, 30, LIMITED), None);
+        assert_eq!(display_fps_trend(&mut c, 0, DECODE, 30, LIMITED), None);
+        assert_eq!(
+            display_fps_trend(&mut c, 0, DECODE, 30, LIMITED),
+            Some(FpsTrend::Increase)
+        );
+    }
+
+    // --- decide_auto_fps: session-level decision ---
+
+    #[test]
+    fn first_run_aligns_to_capacity() {
+        assert_eq!(decide_auto_fps(&[None, None], None, LIMITED), Some(LIMITED));
+    }
+
+    #[test]
+    fn steady_state_no_change() {
+        assert_eq!(decide_auto_fps(&[None, None], Some(LIMITED), LIMITED), None);
+    }
+
+    #[test]
+    fn soft_trims_to_three_quarters() {
+        assert_eq!(
+            decide_auto_fps(
+                &[Some(FpsTrend::DecreaseSoft), None],
+                Some(LIMITED),
+                LIMITED
+            ),
+            Some(LIMITED * 3 / 4)
+        );
+    }
+
+    #[test]
+    fn hard_beats_soft() {
+        assert_eq!(
+            decide_auto_fps(
+                &[Some(FpsTrend::DecreaseHard), Some(FpsTrend::DecreaseSoft)],
+                Some(LIMITED),
+                LIMITED
+            ),
+            Some(LIMITED / 2)
+        );
+    }
+
+    #[test]
+    fn increase_jumps_to_capacity() {
+        assert_eq!(
+            decide_auto_fps(&[Some(FpsTrend::Increase), None], Some(30), LIMITED),
+            Some(LIMITED)
+        );
+    }
+
+    #[test]
+    fn decrease_vetoes_increase() {
+        assert_eq!(
+            decide_auto_fps(
+                &[Some(FpsTrend::Increase), Some(FpsTrend::DecreaseSoft)],
+                Some(LIMITED),
+                LIMITED
+            ),
+            Some(LIMITED * 3 / 4)
+        );
+    }
+
+    #[test]
+    fn never_below_one() {
+        assert_eq!(
+            decide_auto_fps(&[Some(FpsTrend::DecreaseHard)], Some(2), 1),
+            Some(1)
+        );
     }
 }
