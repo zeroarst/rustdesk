@@ -31,6 +31,7 @@ impl Capturer {
     ) -> Result<Capturer, CGError> {
         let stopped = Arc::new(Mutex::new(false));
         let cloned_stopped = stopped.clone();
+        let frame_height = height;
         let handler: FrameAvailableHandler = ConcreteBlock::new(move |status, _, surface, _| {
             use self::CGDisplayStreamFrameStatus::*;
             if status == Stopped {
@@ -38,8 +39,10 @@ impl Capturer {
                 *lock = true;
                 return;
             }
+            // FrameComplete = the display changed; FrameIdle / FrameBlank carry
+            // no new pixels, so we simply skip them (leaving the slot empty).
             if status == FrameComplete {
-                handler(unsafe { Frame::new(surface) });
+                handler(unsafe { Frame::new(surface, frame_height) });
             }
         })
         .copy();

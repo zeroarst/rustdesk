@@ -1,38 +1,33 @@
-use crate::{quartz, Frame, Pixfmt};
+use crate::{common::frame_slot::FrameSlot, quartz, Frame, Pixfmt};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, TryLockError};
-use std::{io, mem};
+use std::sync::Arc;
+use std::{io, time::Duration};
 
 pub struct Capturer {
     inner: quartz::Capturer,
-    frame: Arc<Mutex<Option<quartz::Frame>>>,
-    saved_raw_data: Vec<u8>, // for faster compare and copy
+    slot: Arc<FrameSlot<quartz::Frame>>,
 }
 
 impl Capturer {
     pub fn new(display: Display) -> io::Result<Capturer> {
-        let frame = Arc::new(Mutex::new(None));
+        let slot = Arc::new(FrameSlot::new());
 
-        let f = frame.clone();
+        let producer = slot.clone();
         let inner = quartz::Capturer::new(
             display.0,
             display.width(),
             display.height(),
             quartz::PixelFormat::Argb8888,
             Default::default(),
-            move |inner| {
-                if let Ok(mut f) = f.lock() {
-                    *f = Some(inner);
-                }
+            move |frame| {
+                // Store the newest frame, replacing any the consumer has not
+                // collected yet, and wake a waiting `frame()`.
+                producer.put(frame);
             },
         )
         .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
 
-        Ok(Capturer {
-            inner,
-            frame,
-            saved_raw_data: Vec::new(),
-        })
+        Ok(Capturer { inner, slot })
     }
 
     pub fn width(&self) -> usize {
@@ -45,31 +40,19 @@ impl Capturer {
 }
 
 impl crate::TraitCapturer for Capturer {
-    fn frame<'a>(&'a mut self, _timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
-        match self.frame.try_lock() {
-            Ok(mut handle) => {
-                let mut frame = None;
-                mem::swap(&mut frame, &mut handle);
-
-                match frame {
-                    Some(mut frame) => {
-                        crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
-                        frame.surface_to_bgra(self.height());
-                        Ok(Frame::PixelBuffer(PixelBuffer {
-                            frame,
-                            data: PhantomData,
-                            width: self.width(),
-                            height: self.height(),
-                        }))
-                    }
-
-                    None => Err(io::ErrorKind::WouldBlock.into()),
-                }
-            }
-
-            Err(TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
-
-            Err(TryLockError::Poisoned(..)) => Err(io::ErrorKind::Other.into()),
+    fn frame<'a>(&'a mut self, timeout: Duration) -> io::Result<Frame<'a>> {
+        // Wait (up to `timeout`) for the capture callback to deliver a frame,
+        // instead of polling. The IOSurface behind the frame is read-locked
+        // for the frame's lifetime, so its pixels are handed downstream
+        // without a copy.
+        match self.slot.take(timeout) {
+            Some(frame) => Ok(Frame::PixelBuffer(PixelBuffer {
+                frame,
+                data: PhantomData,
+                width: self.width(),
+                height: self.height(),
+            })),
+            None => Err(io::ErrorKind::WouldBlock.into()),
         }
     }
 }

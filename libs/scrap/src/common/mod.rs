@@ -43,6 +43,7 @@ cfg_if! {
 
 pub mod codec;
 pub mod convert;
+pub(crate) mod frame_slot;
 #[cfg(feature = "hwcodec")]
 pub mod hwcodec;
 #[cfg(feature = "mediacodec")]
