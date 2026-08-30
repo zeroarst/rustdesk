@@ -2092,8 +2092,8 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   // Read the current display's own list; the legacy `pi.resolutions` only
   // mirrors whichever display-changed message arrived last (see
   // PeerInfo.resolutionsMap). No fallback to the legacy list: a display
-  // whose list never arrived in this window (the parked display, or one
-  // already captured by another window — see src/display_park.rs) shows an
+  // whose list never arrived in this window (one already captured by
+  // another window, or only ever armed in passing — src/retina_shim.rs) shows an
   // empty list rather than another display's modes, which would otherwise
   // offer resolutions the display cannot take. The combined view keeps the
   // legacy list (no single display to name).
@@ -2120,9 +2120,7 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
     // the display scale again would halve the reported resolution. Only the
     // legacy info-space rect still needs the divide.
     if (useLogicalDisplayLayout(
-        isPeerLinux: ffiModel.isPeerLinux,
-        isPeerMacOS: ffiModel.isPeerMacOS,
-        allDisplayScales: pi.displays.map((d) => d.scale))) {
+        isPeerLinux: ffiModel.isPeerLinux, isPeerMacOS: ffiModel.isPeerMacOS)) {
       return rect;
     }
     final scale = pi.scaleOfDisplay(pi.currentDisplay);

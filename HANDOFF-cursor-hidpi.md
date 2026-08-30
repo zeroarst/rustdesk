@@ -370,3 +370,159 @@ producer of a `MOUSE_TYPE_MOVE` event rather than assuming.
 Measurement gotchas: each remote window only forwards input when focused; the
 Windows Terminal at (3432,-256) overlaps the portrait RustDesk window and will
 silently steal a sweep.
+
+---
+
+# Superseded: per-display shim arming (2026-08-30/31)
+
+Everything above still describes the shim correctly. The *fix* above does not
+survive one configuration: **every peer display scaled**.
+
+## What went wrong
+
+Roy reported the display-3 window dropping the pointer onto display 1. The Mac
+had drifted to all-2x (the built-in panel had been 1920x1200 @1x in August, now
+1728x1117 @2x), so:
+
+- `choose_park_display` returned `None` — no scale-1 display to park on;
+- `useLogicalDisplayLayout` returned `false` — back to legacy info-space;
+- the shim stayed armed on display 1, guard x in [0, 3456).
+
+Display 3's window sends info-space x in [1728, 7232). Everything below 3456 was
+halved into [864, 1728) — display 1's logical rect. Everything above passed
+verbatim, off the right edge of a 5680-wide desktop.
+
+Measured before the fix (centre window, y=600, host pointer over SSH):
+
+| local x | mac | slope | |
+|---|---|---|---|
+| 160..886 | 947..1719, y=607 | 1.066 | on display 1 |
+| 1007..2579 | 3696..7037, y=1215 | 2.124 | off-desktop |
+
+The break is at client x = 3456 exactly, and y confirms it (607 = 1214/2 before,
+1215 verbatim after).
+
+## Why the old design could not stretch
+
+Sweep every possible wire coordinate against a shim armed on display A (logical
+origin O, physical size P, scale s):
+
+```
+guard G = [O, O+P)              A's logical rect blown up by s
+in G:      out = O + (in-O)/s   covers exactly logical(A)
+outside G: out = in             covers exactly !G
+```
+
+Reachable = `logical(A) | !G`, so every point in `G \ logical(A)` is unreachable
+by ANY wire coordinate. That is the "pre-inversion cannot work" result recorded
+above — and it holds only while the armed display is treated as fixed.
+
+## The fix as built
+
+The client owns the armed display. Arm the one the pointer is over and the
+target is always reachable, exactly:
+
+```
+arm D, send W = O_D + (T - O_D) * s_D   =>  shim returns exactly T
+```
+
+`W` is always inside `G_D`; for `s == 1` it degenerates to `W == T` against an
+inert shim. One rule, any mix of scales, all-scaled included, against an
+unmodified host.
+
+- `src/retina_shim.rs` replaces `src/display_park.rs` —
+  `display_at_logical_point`, `to_info_space`, `from_info_space`, 6 unit tests
+  including a round-trip against a local model of the host's shim.
+- `Session::to_peer_mouse_coords` (ui_session_interface.rs) converts every
+  absolute coordinate and sends a bare `SwitchDisplay` when the pointer crosses
+  to another display. Wheel/trackpad/relative are skipped, matching the shim's
+  own early return.
+- `Session::send_switch_display` is the bare sender: no custom resolution, no
+  capture re-subscription, so arming has no other effect on the session.
+  `armed_display` on `Session` tracks it; `switch_display` keeps it in sync.
+- `handle_peer_info` records the host's starting `display_idx` instead of
+  parking. The chase-repark block is gone.
+- Cursor feedback: `Retina::on_cursor_pos` is the same mapping in reverse, so
+  `Session::adjust_cursor_position` (called from `io_loop.rs`) inverts it for
+  the armed display.
+- `useLogicalDisplayLayout` is now unconditional for macOS peers — no
+  display-count or scale-mix gate.
+
+Ordering is safe: `MouseEvent` and `Misc::SwitchDisplay` are arms of the same
+`match` in the host's single `async fn on_message`, and `switch_display_to`
+assigns `display_idx` synchronously.
+
+## Verified 2026-08-31 (peer 1.4.9, displays 1920x1200 @1x / 1200x1920 @2x /
+2752x1152 @2x)
+
+| window | slope | mac x range | display's logical rect |
+|---|---|---|---|
+| display 0, scale 1 | 1.000 | 222..1860 | [0, 1920) |
+| display 1, scale 2 | 2.821..2.825 | 4786..5743 | [4672, 5872) |
+| display 2, scale 2 | 1.061..1.067 | 2072..4650 | [1920, 4672) |
+
+Uniform slope per window, no discontinuity, no cross-display drift. Round trips
+confirmed exact in the logs, e.g. logical (3888,1151) -> wire (5856,2302) ->
+host pointer (3888,1151). Display 2's last 21 px are unreachable at the window
+edge; the August run recorded the same 4650 ceiling, so it is pre-existing.
+
+**Re-verified 2026-08-31 in the ALL-SCALED configuration** — the case the old
+design could not serve at all. Roy re-enabled HiDPI on the built-in panel, so
+every display was scale 2.0 (built-in 2056x1285 @2 at origin 0, portrait
+1200x1920 @2 at 4808, big 2752x1152 @2 at 2056):
+
+| window | slope | mac x range | display's logical rect |
+|---|---|---|---|
+| display 0 | 1.092..1.099 | 184..2014 | [0, 2056) |
+| display 1 | 1.010..1.021 | 4916..5996 | [4808, 6008) |
+| display 2 | 1.058..1.069 | 2233..4638 | [2056, 4808) |
+
+Uniform per window, in bounds, constant y. No parking spot exists in this
+configuration and it does not matter.
+
+**Not re-verified:** the combined "all displays" view, and the resolution menu.
+
+## Two copies of the display list — the bug this shipped with
+
+The host DOES push display changes: a resolution change, a HiDPI toggle or a
+display appearing sends a `PeerInfo` message (`display_service.rs
+displays_to_msg`), handled at `io_loop.rs` `Union::PeerInfo`. That called
+`set_displays`, which updates the **FlutterHandler's** `peer_info` — the Dart
+UI's copy, which recomputes its rect in `handleSyncPeerInfo`.
+
+The Retina conversion reads the **LoginConfigHandler's** `lc.peer_info`, which
+is written only once, in `handle_peer_info` at connect. So after Roy toggled
+HiDPI mid-session, the Dart rect moved to the new geometry (origins 2056/4808)
+while the conversion stayed on the old one (1920/4672) and every window's
+cursor was off by the 136 px shift. Not pre-existing — before this work the
+Rust side did no coordinate conversion at all, so only the Dart copy mattered.
+
+Fixed in the same `Union::PeerInfo` arm: `lc.peer_info.displays` is updated
+alongside, and `armed_display` is reset to `None` so the next mouse event
+re-arms from the fresh list (indices can now mean different displays).
+
+Verified 2026-08-31 with the session left connected across a HiDPI toggle on
+the built-in panel (all-scaled -> built-in back to 1920x1200 @1x, origins
+2056/4808 -> 1920/4672):
+
+| window | slope | mac x range | display's logical rect |
+|---|---|---|---|
+| display 0, scale 2 -> 1 | 1.023..1.027 | 275..1861 | [0, 1920) |
+| display 1, scale 2 | 1.014..1.021 | 4845..5840 | [4672, 5872) |
+| display 2, scale 2 | 1.063 | 2211..4650 | [1920, 4672) |
+
+No reconnect. If the sync had not landed, display 2's far edge would have
+overshot to ~4786, outside the new rect.
+
+**If a cursor bug ever looks like a constant offset**, compare the client log's
+last `handle_peer_info` geometry with `/tmp/displays` on the Mac first — a
+geometry mismatch looks identical to a coordinate-math bug.
+
+## Measurement trap that cost three rounds
+
+A **PotPlayer window covering the centre monitor kept reclaiming foreground**,
+so `focus-window.ps1` reported success while the RustDesk window never actually
+had focus. Every sweep then measured the *previously* focused window and read as
+"frozen pointer". `D:\dev\setup\force-focus.ps1` (added) uses
+`AttachThreadInput` so `SetForegroundWindow` is not refused, and prints whether
+the target actually became foreground — check that line before trusting a sweep.

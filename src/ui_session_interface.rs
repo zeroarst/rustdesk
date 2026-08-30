@@ -2,7 +2,7 @@ use crate::{
     common::{get_supported_keyboard_modes, is_keyboard_mode_supported},
     input::{
         MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_DOWN, MOUSE_TYPE_MASK,
-        MOUSE_TYPE_TRACKPAD, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL,
+        MOUSE_TYPE_MOVE_RELATIVE, MOUSE_TYPE_TRACKPAD, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL,
     },
     ui_interface::use_texture_render,
 };
@@ -72,6 +72,11 @@ pub struct Session<T: InvokeUiSession> {
     pub reconnect_count: Arc<AtomicUsize>,
     pub last_audit_note: Arc<Mutex<String>>,
     pub audit_guid: Arc<Mutex<String>>,
+    // The display the host's `display_idx` is currently armed on, as far as
+    // this client knows. `send_mouse` keeps it on the display the pointer is
+    // over so the macOS Retina shim converts coordinates for the right
+    // display (src/retina_shim.rs). `None` until the first switch is sent.
+    pub armed_display: Arc<Mutex<Option<usize>>>,
 }
 
 #[derive(Clone)]
@@ -783,58 +788,37 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    /// Send a bare `SwitchDisplay`. This is what moves the host's
+    /// `display_idx`; everything else `switch_display` does (custom
+    /// resolution, capture re-subscription) is deliberately not here, so the
+    /// Retina-shim arming in `to_peer_mouse_coords` can move `display_idx`
+    /// without any other effect on the session.
+    fn send_switch_display(&self, display: i32, width: i32, height: i32) {
+        if display >= 0 {
+            *self.armed_display.lock().unwrap() = Some(display as usize);
+        }
+        let mut misc = Misc::new();
+        misc.set_switch_display(SwitchDisplay {
+            display,
+            width,
+            height,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn switch_display(&self, display: i32) {
         let (w, h) = match self.lc.read().unwrap().get_custom_resolution(display) {
             Some((w, h)) => (w, h),
             None => (0, 0),
         };
 
-        let mut misc = Misc::new();
-        misc.set_switch_display(SwitchDisplay {
-            display,
-            width: w,
-            height: h,
-            ..Default::default()
-        });
-        let mut msg_out = Message::new();
-        msg_out.set_misc(misc);
-        self.send(Data::Message(msg_out));
+        self.send_switch_display(display, w, h);
 
         if !use_texture_render() {
             self.capture_displays(vec![], vec![], vec![display]);
-        }
-
-        // A switch that armed a scaled display on a macOS peer is chased
-        // with a re-parking switch so the host's Retina shim stays inert for
-        // the logical coordinates this client sends (src/display_park.rs).
-        // The arming switch is sent normally — not suppressed — because its
-        // echo carries the SupportedResolutions the resolution menu needs;
-        // the shim is armed only for the instant between the two messages.
-        // The flutter desktop layer prunes the park display's video
-        // subscription right afterwards (check_remove_unused_displays).
-        if display >= 0 && use_texture_render() && self.peer_platform() == "Mac OS" {
-            let park = {
-                let lc = self.lc.read().unwrap();
-                lc.peer_info.as_ref().and_then(|pi| {
-                    if crate::common::is_support_multi_ui_session(&pi.version)
-                        && crate::display_park::needs_repark_after_switch(
-                            &pi.displays,
-                            display as usize,
-                        )
-                    {
-                        crate::display_park::choose_park_display(&pi.displays)
-                    } else {
-                        None
-                    }
-                })
-            };
-            if let Some(park) = park {
-                // The park target is scale-1, so this recursion cannot chase
-                // again.
-                if park as i32 != display {
-                    self.switch_display(park as i32);
-                }
-            }
         }
     }
 
@@ -1228,7 +1212,13 @@ impl<T: InvokeUiSession> Session<T> {
             }
         }
 
-        send_mouse(mask, x, y, alt, ctrl, shift, command, self);
+        // Absolute coordinates leave this client in logical points. A macOS
+        // host converts them in its Retina shim, keyed on the display it has
+        // armed, so arm the display the pointer is over and hand it that
+        // display's info-space coordinate — see src/retina_shim.rs for why
+        // no other arrangement can address every display.
+        let (sx, sy) = self.to_peer_mouse_coords(event_type, x, y);
+        send_mouse(mask, sx, sy, alt, ctrl, shift, command, self);
         // on macos, ctrl + left button down = right button down, up won't emit, so we need to
         // emit up myself if peer is not macos
         // to-do: how about ctrl + left from win to macos
@@ -1250,6 +1240,81 @@ impl<T: InvokeUiSession> Session<T> {
                 );
             }
         }
+    }
+
+    /// Prepare an absolute mouse coordinate for the peer, arming the host's
+    /// Retina shim on the display the point belongs to.
+    ///
+    /// Only macOS hosts run the shim, and only on absolute events — wheel,
+    /// trackpad and relative moves carry deltas and are returned untouched,
+    /// matching `Retina::on_mouse_event`'s own early return. Non-macOS peers
+    /// and peers too old for multi-ui sessions are left alone entirely.
+    fn to_peer_mouse_coords(&self, event_type: i32, x: i32, y: i32) -> (i32, i32) {
+        if event_type == MOUSE_TYPE_WHEEL
+            || event_type == MOUSE_TYPE_TRACKPAD
+            || event_type == MOUSE_TYPE_MOVE_RELATIVE
+        {
+            return (x, y);
+        }
+        if self.peer_platform() != "Mac OS" {
+            return (x, y);
+        }
+        let (target, coords) = {
+            let lc = self.lc.read().unwrap();
+            let Some(pi) = lc.peer_info.as_ref() else {
+                return (x, y);
+            };
+            if !crate::common::is_support_multi_ui_session(&pi.version) {
+                return (x, y);
+            }
+            let Some(idx) = crate::retina_shim::display_at_logical_point(&pi.displays, x, y) else {
+                // A point in a gap or off the desktop belongs to no display;
+                // leave both the arming and the coordinate as they are.
+                return (x, y);
+            };
+            (idx, crate::retina_shim::to_info_space(&pi.displays[idx], x, y))
+        };
+        // Ordering with the move that follows is guaranteed: the host handles
+        // both messages in one `on_message` match and assigns `display_idx`
+        // synchronously. Only the pointer crossing between displays sends
+        // one of these, not every move.
+        // Bind first: a temporary in an `if` condition lives to the end of
+        // the whole `if`, so locking inline would still hold the guard when
+        // `send_switch_display` takes it again.
+        let armed = *self.armed_display.lock().unwrap();
+        if armed != Some(target) {
+            self.send_switch_display(target as i32, 0, 0);
+        }
+        coords
+    }
+
+    /// Undo the host's reverse Retina mapping on a reported cursor position.
+    ///
+    /// `Retina::on_cursor_pos` multiplies by the armed display's scale, so
+    /// with a scaled display armed the host reports info-space positions
+    /// while this client's canvas is laid out in logical points.
+    pub fn adjust_cursor_position(&self, mut cp: CursorPosition) -> CursorPosition {
+        if self.peer_platform() != "Mac OS" {
+            return cp;
+        }
+        let armed = *self.armed_display.lock().unwrap();
+        let Some(armed) = armed else {
+            return cp;
+        };
+        let lc = self.lc.read().unwrap();
+        let Some(pi) = lc.peer_info.as_ref() else {
+            return cp;
+        };
+        if !crate::common::is_support_multi_ui_session(&pi.version) {
+            return cp;
+        }
+        let Some(d) = pi.displays.get(armed) else {
+            return cp;
+        };
+        let (x, y) = crate::retina_shim::from_info_space(d, cp.x, cp.y);
+        cp.x = x;
+        cp.y = y;
+        cp
     }
 
     pub fn reconnect(&self, force_relay: bool) {
@@ -1806,27 +1871,11 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 current.cursor_embedded,
                 current.scale,
             );
-            // Park the host's `display_idx` on a scale-1 display when the
-            // macOS peer mixes display scales and the connection starts on a
-            // scaled one, so the host's Retina shim stays inert for the
-            // logical coordinates this client sends (src/display_park.rs).
-            // Multi-ui peers (>=1.2.4) ignore the resulting switch echo for
-            // current-display purposes, so the UI does not flip.
-            if pi.platform == "Mac OS"
-                && crate::common::is_support_multi_ui_session(&pi.version)
-            {
-                if let Some(park) = crate::display_park::choose_park_display(&pi.displays) {
-                    let cur = pi.current_display as usize;
-                    let cur_scaled = pi
-                        .displays
-                        .get(cur)
-                        .map(|d| d.scale > 1.0)
-                        .unwrap_or(false);
-                    if cur != park && cur_scaled {
-                        self.switch_display(park as i32);
-                    }
-                }
-            }
+            // A fresh connection starts with the host's `display_idx` on its
+            // primary display. Record that, so the first pointer movement
+            // only sends a `SwitchDisplay` if it lands somewhere else
+            // (src/retina_shim.rs).
+            *self.armed_display.lock().unwrap() = Some(pi.current_display as usize);
         }
         self.update_privacy_mode();
         // Clear audit_guid when connection is established successfully

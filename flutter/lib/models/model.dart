@@ -194,25 +194,19 @@ class FfiModel with ChangeNotifier {
       return null;
     }
     // macOS reports each display's origin in logical points (CGDisplayBounds)
-    // but its width/height in physical pixels. When the peer has a scale-1
-    // display, the Rust side parks the host's current display there so its
-    // Retina shim stays inert (src/display_park.rs), and this rect must then
-    // be fully logical — divide sizes by `scale`. When every display is
-    // scaled there is no parking spot and the legacy info-space rect is kept
-    // (the armed shim divides for us). Linux keeps its unconditional
-    // behaviour.
+    // but its width/height in physical pixels, so the rect must divide the
+    // sizes by `scale` to be self-consistent. The Rust side converts each
+    // outgoing absolute coordinate back into the info space of whichever
+    // display it lands on (src/retina_shim.rs), so this holds for any mix of
+    // display scales. Linux keeps its unconditional behaviour.
     //
     // NOTE: this rect is the cursor/input coordinate space. The video frame
     // is still delivered in physical pixels, so every site that sizes a
     // frame from `Display.width/height` must divide by `scale` to match —
     // see the `useLogicalDisplayLayout` call sites in
-    // desktop/pages/remote_page.dart. The predicate runs on ALL peer
-    // displays (`_pi.displays`), not the passed subset: parking is
-    // per-connection state shared by every window.
+    // desktop/pages/remote_page.dart.
     if (useLogicalDisplayLayout(
-        isPeerLinux: isPeerLinux,
-        isPeerMacOS: isPeerMacOS,
-        allDisplayScales: _pi.displays.map((d) => d.scale))) {
+        isPeerLinux: isPeerLinux, isPeerMacOS: isPeerMacOS)) {
       useDisplayScale = true;
     }
     int scale(int len, double s) {
@@ -894,9 +888,10 @@ class FfiModel with ChangeNotifier {
     }
 
     // Store the list under the display it belongs to even when that display
-    // is not current: with display_idx parking (src/display_park.rs) some
-    // displays only ever announce their resolutions once, and the last
-    // arrival must not clobber another display's list.
+    // is not current: `display_idx` is moved for Retina-shim arming
+    // (src/retina_shim.rs) as well as by the user, so these messages do not
+    // track the viewed display and the last arrival must not clobber
+    // another display's list.
     handleResolutions(peerId, evt['resolutions'], display);
     notifyListeners();
   }
@@ -4246,9 +4241,9 @@ class PeerInfo with ChangeNotifier {
   List<Resolution> resolutions = [];
   // Per-display supported resolutions. `resolutions` above only tracks the
   // current display and is overwritten by whichever display-changed message
-  // arrived last; with the display_idx parking for macOS peers
-  // (src/display_park.rs) those messages no longer follow every switch, so
-  // consumers that can name a display should read this map instead.
+  // arrived last; for macOS peers `display_idx` also moves for Retina-shim
+  // arming (src/retina_shim.rs), so those messages do not track the viewed
+  // display and consumers that can name one should read this map instead.
   Map<int, List<Resolution>> resolutionsMap = {};
   Map<String, dynamic> platformAdditions = {};
 

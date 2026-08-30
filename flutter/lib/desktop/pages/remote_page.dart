@@ -1186,14 +1186,11 @@ class _ImagePaintState extends State<ImagePaint> {
     // The canvas rect is in logical points for these peers (see
     // FfiModel._getDisplaysRect) but the decoded frame is in physical pixels,
     // so the painted size has to be divided back down by the display scale.
-    // The condition must match _getDisplaysRect exactly — session-global, all
-    // peer displays.
+    // The condition must match _getDisplaysRect exactly.
     final displays = widget.ffi.ffiModel.pi.getCurDisplays();
     if (useLogicalDisplayLayout(
         isPeerLinux: widget.ffi.ffiModel.isPeerLinux,
-        isPeerMacOS: widget.ffi.ffiModel.isPeerMacOS,
-        allDisplayScales:
-            widget.ffi.ffiModel.pi.displays.map((d) => d.scale))) {
+        isPeerMacOS: widget.ffi.ffiModel.isPeerMacOS)) {
       if (displays.isNotEmpty) {
         sizeScale = s / displays[0].scale;
       }
@@ -1219,12 +1216,10 @@ class _ImagePaintState extends State<ImagePaint> {
     }
     // See _buildScrollAutoNonTextureRender: the rect is logical, the texture
     // is physical, so its painted size must be divided by the display scale.
-    // The condition must match _getDisplaysRect exactly — session-global, all
-    // peer displays.
+    // The condition must match _getDisplaysRect exactly.
     final isScaledPeer = useLogicalDisplayLayout(
         isPeerLinux: ffiModel.isPeerLinux,
-        isPeerMacOS: ffiModel.isPeerMacOS,
-        allDisplayScales: ffiModel.pi.displays.map((d) => d.scale));
+        isPeerMacOS: ffiModel.isPeerMacOS);
     final curDisplay = ffiModel.pi.currentDisplay;
     for (var i = 0; i < displays.length; i++) {
       final textureId = widget.ffi.textureModel

@@ -1433,7 +1433,10 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.handler.set_cursor_id(id.to_string());
                 }
                 Some(message::Union::CursorPosition(cp)) => {
-                    self.handler.set_cursor_position(cp);
+                    // A macOS host reports this in the armed display's info
+                    // space when that display is scaled (src/retina_shim.rs).
+                    self.handler
+                        .set_cursor_position(self.handler.adjust_cursor_position(cp));
                 }
                 Some(message::Union::Clipboard(cb)) => {
                     let clipboard_allowed = {
@@ -2081,6 +2084,19 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 Some(message::Union::PeerInfo(pi)) => {
+                    // The host sends this whenever its display list changes
+                    // (resolution, HiDPI toggle, a display added or removed).
+                    // The login config's copy is what the Retina-shim
+                    // conversion reads (src/retina_shim.rs), so it has to move
+                    // with it — stale geometry there puts every coordinate off
+                    // by the origin shift while the UI's own rect is already
+                    // correct. Drop the arming too: the indices it refers to
+                    // may now mean different displays, and the next mouse event
+                    // re-arms from the fresh list.
+                    if let Some(lc_pi) = self.handler.lc.write().unwrap().peer_info.as_mut() {
+                        lc_pi.displays = pi.displays.clone();
+                    }
+                    *self.handler.armed_display.lock().unwrap() = None;
                     self.handler.set_displays(&pi.displays);
                     self.handler.set_platform_additions(&pi.platform_additions);
                 }

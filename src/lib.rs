@@ -1,4 +1,4 @@
-mod display_park;
+mod retina_shim;
 mod keyboard;
 mod modifier_remap;
 /// cbindgen:ignore
