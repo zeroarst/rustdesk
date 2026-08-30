@@ -340,6 +340,16 @@ class ToolbarState {
     }
   }
 
+  /// Expand/collapse without touching persisted state.
+  ///
+  /// Hover opens the toolbar and a short idle timeout closes it again; both are
+  /// ephemeral, so they must not rewrite the per-display config the way
+  /// [switchCollapse] does. The persisted value stays whatever the user last
+  /// chose explicitly.
+  void setCollapseTransient(bool v) {
+    if (collapse.value != v) collapse.value = v;
+  }
+
   // Switch hide state for entire toolbar visibility
   switchHide(SessionID sessionId) async {
     hide.value = !hide.value;
@@ -481,6 +491,33 @@ class RemoteMenuEntry {
   }
 }
 
+/// Lets the toolbar's dropdown buttons report their open/closed state up to
+/// [_RemoteToolbarState] without threading a parameter through every call site.
+///
+/// The hover-dismiss timer needs this: a dropdown's popup renders in an overlay
+/// outside the toolbar's own bounds, so moving the pointer into it fires the
+/// toolbar's `onExit` and would otherwise collapse the row out from under the
+/// menu the user is reading.
+class _ToolbarMenuScope extends InheritedWidget {
+  final VoidCallback onMenuOpened;
+  final VoidCallback onMenuClosed;
+
+  const _ToolbarMenuScope({
+    Key? key,
+    required this.onMenuOpened,
+    required this.onMenuClosed,
+    required Widget child,
+  }) : super(key: key, child: child);
+
+  static _ToolbarMenuScope? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_ToolbarMenuScope>();
+
+  @override
+  bool updateShouldNotify(_ToolbarMenuScope oldWidget) =>
+      onMenuOpened != oldWidget.onMenuOpened ||
+      onMenuClosed != oldWidget.onMenuClosed;
+}
+
 class RemoteToolbar extends StatefulWidget {
   final String id;
   final FFI ffi;
@@ -526,6 +563,17 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   bool _pendingDockingOptionSync = false;
   int _dockingOptionSyncSerial = 0;
   int _dragEpoch = 0;
+
+  // Hover-driven open/close. The arrow on the collapsed handle opens the
+  // toolbar on mouse-enter; leaving the toolbar (row + handle, which are one
+  // contiguous region) closes it again after a short grace period so a quick
+  // trip across a corner doesn't dismiss it.
+  static const _hoverDismissDelay = Duration(milliseconds: 500);
+  Timer? _hoverDismissTimer;
+  bool _pointerInsideToolbar = false;
+  // Number of toolbar dropdowns currently open; dismissal is suppressed while
+  // any of them is showing, see [_ToolbarMenuScope].
+  int _openMenuCount = 0;
 
   int get windowId => stateGlobal.windowId;
 
@@ -660,6 +708,65 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     ++_dragEpoch;
   }
 
+  void _cancelHoverDismiss() {
+    _hoverDismissTimer?.cancel();
+    _hoverDismissTimer = null;
+  }
+
+  /// Close the toolbar after [_hoverDismissDelay] unless something is holding
+  /// it open. Re-entering the toolbar, opening a dropdown or starting a drag
+  /// all cancel a pending dismissal.
+  void _scheduleHoverDismiss() {
+    _cancelHoverDismiss();
+    if (collapse.isTrue) return;
+    _hoverDismissTimer = Timer(_hoverDismissDelay, () {
+      _hoverDismissTimer = null;
+      if (!mounted) return;
+      if (pin ||
+          _dragging.isTrue ||
+          _openMenuCount > 0 ||
+          _pointerInsideToolbar) {
+        return;
+      }
+      widget.state.setCollapseTransient(true);
+    });
+  }
+
+  void _onToolbarPointerEnter() {
+    _pointerInsideToolbar = true;
+    _cancelHoverDismiss();
+  }
+
+  void _onToolbarPointerExit() {
+    _pointerInsideToolbar = false;
+    if (_openMenuCount > 0) return;
+    _scheduleHoverDismiss();
+  }
+
+  /// Hover on the collapse arrow opens the toolbar. This never persists; see
+  /// [ToolbarState.setCollapseTransient].
+  void _onCollapseArrowHovered() {
+    // The Draggable's feedback is a live copy of the handle, so its arrow can
+    // report a hover while the user is repositioning the toolbar.
+    if (_dragging.isTrue) return;
+    _cancelHoverDismiss();
+    widget.state.setCollapseTransient(false);
+  }
+
+  void _onMenuOpened() {
+    _openMenuCount++;
+    _cancelHoverDismiss();
+  }
+
+  void _onMenuClosed() {
+    if (_openMenuCount > 0) _openMenuCount--;
+    // The menu may have been dismissed with the pointer well away from the
+    // toolbar, in which case no onExit will arrive to start the timer.
+    if (_openMenuCount == 0 && !_pointerInsideToolbar) {
+      _scheduleHoverDismiss();
+    }
+  }
+
   void _syncDockingOptionsAfterDragIfNeeded() {
     if (!_pendingDockingOptionSync) return;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -724,6 +831,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   @override
   dispose() {
     ++_dockingOptionSyncSerial;
+    _cancelHoverDismiss();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     super.dispose();
   }
@@ -754,13 +862,20 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         }
       });
 
+      // The MouseRegion sits inside the Align, around the sized subtree only:
+      // the Align itself expands to fill the Stack, so hovering it would mean
+      // hovering the whole remote image.
       final toolbar = Align(
         alignment: _alignmentForEdge(edge, _fraction.value),
-        child: KeyedSubtree(
-          key: _toolbarKey,
-          child: collapse.isFalse
-              ? _buildToolbar(context, edge, isHorizontal)
-              : _buildDraggableCollapse(context, edge, isHorizontal),
+        child: MouseRegion(
+          onEnter: (_) => _onToolbarPointerEnter(),
+          onExit: (_) => _onToolbarPointerExit(),
+          child: KeyedSubtree(
+            key: _toolbarKey,
+            child: collapse.isFalse
+                ? _buildToolbar(context, edge, isHorizontal)
+                : _buildDraggableCollapse(context, edge, isHorizontal),
+          ),
         ),
       );
 
@@ -836,6 +951,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
                 _syncDockingOptionsAfterDragIfNeeded,
             isHorizontal: isHorizontal,
             multiEdgeEnabled: _multiEdgeEnabled.value,
+            onCollapseArrowHovered: _onCollapseArrowHovered,
             toolbarState: widget.state,
             setFullscreen: _setFullscreen,
             setMinimize: _minimize,
@@ -942,10 +1058,14 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     final children = (edge == _ToolbarEdge.top || edge == _ToolbarEdge.left)
         ? [toolbarMaterial, handle]
         : [handle, toolbarMaterial];
-    return Flex(
-      direction: outerAxis,
-      mainAxisSize: MainAxisSize.min,
-      children: children,
+    return _ToolbarMenuScope(
+      onMenuOpened: _onMenuOpened,
+      onMenuClosed: _onMenuClosed,
+      child: Flex(
+        direction: outerAxis,
+        mainAxisSize: MainAxisSize.min,
+        children: children,
+      ),
     );
   }
 
@@ -3004,6 +3124,9 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   @override
   Widget build(BuildContext context) {
     assert(widget.svg != null || widget.icon != null);
+    // Null outside the remote toolbar (e.g. nested reuse); hover-dismiss
+    // tracking simply doesn't apply there.
+    final menuScope = _ToolbarMenuScope.maybeOf(context);
     final icon = widget.icon ??
         SvgPicture.asset(
           widget.svg!,
@@ -3018,6 +3141,8 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
             menuStyle:
                 widget.menuStyle ?? _ToolbarTheme.defaultMenuStyle(context),
             style: _ToolbarTheme.defaultMenuButtonStyle,
+            onOpen: menuScope?.onMenuOpened,
+            onClose: menuScope?.onMenuClosed,
             onHover: (value) => setState(() {
                   hover = value;
                 }),
@@ -3181,6 +3306,9 @@ class _DraggableShowHide extends StatefulWidget {
   // Settings -> Other). When false, the drag handle slides the toolbar
   // horizontally on the top edge and never switches edges.
   final bool multiEdgeEnabled;
+  // Called when the pointer enters the collapse arrow. Hover is the only way
+  // to open the toolbar; clicking the arrow just closes it again.
+  final VoidCallback onCollapseArrowHovered;
   final RxBool dragging;
   final ToolbarState toolbarState;
   final BorderRadius borderRadius;
@@ -3202,6 +3330,7 @@ class _DraggableShowHide extends StatefulWidget {
     required this.syncDockingOptionsAfterDragIfNeeded,
     required this.isHorizontal,
     required this.multiEdgeEnabled,
+    required this.onCollapseArrowHovered,
     required this.dragging,
     required this.toolbarState,
     required this.setFullscreen,
@@ -3220,6 +3349,11 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
   Offset? _dragGrabOffset;
   double? _dragLongAxisGrabOffset;
   Size? _dragToolbarSize;
+  // Set when the user clicks the arrow to close the toolbar. Collapsing moves
+  // the handle by the toolbar's thickness, so the pointer normally ends up off
+  // it; this guards the case where it doesn't and the arrow would immediately
+  // hover itself back open. Cleared once the pointer actually leaves.
+  bool _suppressHoverOpen = false;
 
   RxBool get collapse => widget.toolbarState.collapse;
 
@@ -3480,18 +3614,32 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
                   ),
                 ),
               )),
-        buttonWrapper(
-          () => setState(() {
-            widget.toolbarState.switchCollapse(widget.sessionId);
-          }),
-          Obx((() => Tooltip(
-                message: translate(
-                    collapse.isFalse ? 'Hide Toolbar' : 'Show Toolbar'),
-                child: Icon(
-                  _toolbarCollapseIcon(widget.edge.value, collapse.isTrue),
-                  size: iconSize,
-                ),
-              ))),
+        MouseRegion(
+          onEnter: (_) {
+            if (_suppressHoverOpen) return;
+            widget.onCollapseArrowHovered();
+          },
+          onExit: (_) => _suppressHoverOpen = false,
+          child: buttonWrapper(
+            () {
+              // Click-to-open is gone; hover does that. While the toolbar is
+              // open the arrow still closes it, so the user doesn't have to
+              // wait out the dismiss timer.
+              if (collapse.isTrue) return;
+              _suppressHoverOpen = true;
+              setState(() {
+                widget.toolbarState.switchCollapse(widget.sessionId);
+              });
+            },
+            Obx((() => Tooltip(
+                  message: translate(
+                      collapse.isFalse ? 'Hide Toolbar' : 'Show Toolbar'),
+                  child: Icon(
+                    _toolbarCollapseIcon(widget.edge.value, collapse.isTrue),
+                    size: iconSize,
+                  ),
+                ))),
+          ),
         ),
         if (isWebDesktop)
           Obx(() {
