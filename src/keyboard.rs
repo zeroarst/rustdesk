@@ -715,6 +715,34 @@ fn stop_grab_loop() -> Result<(), rdev::GrabError> {
     Ok(())
 }
 
+// Live "is Ctrl held" query for the local UI.
+//
+// `start_grab_loop`'s low-level hook returns `None` for every key press while a
+// session owns the keyboard grab, so the press never reaches the local window
+// and Flutter's own `HardwareKeyboard` never sees it. The hook does keep rdev's
+// modifier table up to date before swallowing, so that table is the only
+// reliable source here.
+#[cfg(target_os = "windows")]
+pub fn is_ctrl_pressed() -> bool {
+    use winapi::um::winuser::{GetAsyncKeyState, GetKeyState, VK_CONTROL};
+
+    // The hook keeps rdev's table current even for presses it swallows, and the
+    // OS still answers when the grab is not held, so ask every source.
+    if rdev::get_modifier(Key::ControlLeft) || rdev::get_modifier(Key::ControlRight) {
+        return true;
+    }
+    unsafe {
+        GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000 != 0
+            || GetKeyState(VK_CONTROL) as u16 & 0x8000 != 0
+    }
+}
+
+// Other platforms do not swallow presses, so the caller's own key state answers.
+#[cfg(not(target_os = "windows"))]
+pub fn is_ctrl_pressed() -> bool {
+    false
+}
+
 pub fn is_long_press(event: &Event) -> bool {
     let keys = MODIFIERS_STATE.lock().unwrap();
     match event.event_type {

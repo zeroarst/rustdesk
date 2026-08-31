@@ -136,6 +136,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       body: DesktopTab(
         controller: tabController,
         onWindowCloseButton: handleWindowCloseButton,
+        onWindowCloseAllButton: handleWindowCloseAllButton,
         tail: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -380,12 +381,6 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
       loopCloseWindow();
     }
-    // Close this peer's windows on the other displays too, if enabled.
-    if (bind.mainGetPeerFlutterOptionSync(
-            id: id, k: kOptionCloseAllWindowsTogether) ==
-        'Y') {
-      rustDeskWinManager.call(WindowType.Main, kWindowEventCloseForPeer, id);
-    }
     ConnectionTypeState.delete(id);
     // Clean up relative mouse mode state for this peer.
     stateGlobal.relativeMouseModeState.remove(id);
@@ -422,6 +417,20 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       }
       return res;
     }
+  }
+
+  // Ctrl+click on the window close button: close every window that hosts a
+  // session of the peers open in this window (one window per display).
+  Future<bool> handleWindowCloseAllButton() async {
+    final peers =
+        tabController.state.value.tabs.map((e) => e.key).toSet().toList();
+    if (!await handleWindowCloseButton()) {
+      return false;
+    }
+    for (final peer in peers) {
+      rustDeskWinManager.call(WindowType.Main, kWindowEventCloseForPeer, peer);
+    }
+    return true;
   }
 
   _update_remote_count() =>

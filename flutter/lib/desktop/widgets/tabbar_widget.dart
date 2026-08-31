@@ -6,6 +6,7 @@ import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' hide TabBarTheme;
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
@@ -246,6 +247,8 @@ class DesktopTab extends StatefulWidget {
   final TabMenuBuilder? tabMenuBuilder;
   final Widget? tail;
   final Future<bool> Function()? onWindowCloseButton;
+  // Ctrl+click on the window close button. Null hides the "close all" variant.
+  final Future<bool> Function()? onWindowCloseAllButton;
   final TabBuilder? tabBuilder;
   final LabelGetter? labelGetter;
   final double? maxLabelWidth;
@@ -271,6 +274,7 @@ class DesktopTab extends StatefulWidget {
     this.tabMenuBuilder,
     this.tail,
     this.onWindowCloseButton,
+    this.onWindowCloseAllButton,
     this.tabBuilder,
     this.labelGetter,
     this.maxLabelWidth,
@@ -307,6 +311,8 @@ class _DesktopTabState extends State<DesktopTab>
   Widget? get tail => widget.tail;
   Future<bool> Function()? get onWindowCloseButton =>
       widget.onWindowCloseButton;
+  Future<bool> Function()? get onWindowCloseAllButton =>
+      widget.onWindowCloseAllButton;
   TabBuilder? get tabBuilder => widget.tabBuilder;
   LabelGetter? get labelGetter => widget.labelGetter;
   double? get maxLabelWidth => widget.maxLabelWidth;
@@ -692,6 +698,7 @@ class _DesktopTabState extends State<DesktopTab>
           showMaximize: showMaximize,
           showClose: showClose,
           onClose: onWindowCloseButton,
+          onCloseAll: onWindowCloseAllButton,
           labelGetter: labelGetter,
         ).paddingOnly(left: 10)
       ],
@@ -709,6 +716,8 @@ class WindowActionPanel extends StatefulWidget {
   final bool showClose;
   final Widget? tail;
   final Future<bool> Function()? onClose;
+  // Ctrl+click on the close button. Null hides the "close all" variant.
+  final Future<bool> Function()? onCloseAll;
 
   final RxList<String> invisibleTabKeys;
   final LabelGetter? labelGetter;
@@ -724,6 +733,7 @@ class WindowActionPanel extends StatefulWidget {
       this.showMaximize = true,
       this.showClose = true,
       this.onClose,
+      this.onCloseAll,
       this.labelGetter})
       : super(key: key);
 
@@ -799,27 +809,34 @@ class WindowActionPanelState extends State<WindowActionPanel> {
                 ActionIcon(
                   message: 'Close',
                   icon: IconFont.close,
-                  onTap: () async {
-                    final res = await widget.onClose?.call() ?? true;
-                    if (res) {
-                      // hide for all window
-                      // note: the main window can be restored by tray icon
-                      Future.delayed(Duration.zero, () async {
-                        if (widget.isMainWindow) {
-                          await windowManager.close();
-                        } else {
-                          await WindowController.fromWindowId(kWindowId!)
-                              .close();
-                        }
-                      });
-                    }
-                  },
+                  onTap: () => _closeWindow(widget.onClose),
+                  ctrlIconBuilder:
+                      widget.onCloseAll == null ? null : buildCloseAllIcon,
+                  ctrlMessage: 'Close all windows of this session',
+                  ctrlHint: 'Hold Ctrl to close all windows of this session',
+                  ctrlOnTap: widget.onCloseAll == null
+                      ? null
+                      : () => _closeWindow(widget.onCloseAll),
                   isClose: true,
                 )
             ],
           ),
       ],
     );
+  }
+
+  Future<void> _closeWindow(Future<bool> Function()? handler) async {
+    final res = await handler?.call() ?? true;
+    if (!res) return;
+    // hide for all window
+    // note: the main window can be restored by tray icon
+    Future.delayed(Duration.zero, () async {
+      if (widget.isMainWindow) {
+        await windowManager.close();
+      } else {
+        await WindowController.fromWindowId(kWindowId!).close();
+      }
+    });
   }
 
   void _toggleMaximize() {
@@ -1248,6 +1265,32 @@ class _CloseButton extends StatelessWidget {
   }
 }
 
+// Two close glyphs stacked, the rear one offset up-right and dimmed, so the
+// "close all" variant still reads as a close button at `_kActionIconSize`.
+Widget buildCloseAllIcon(Color color, double size) {
+  final glyph = size * 0.85;
+  final offset = size * 0.45;
+  return SizedBox(
+    width: glyph + offset,
+    height: glyph + offset,
+    child: Stack(
+      children: [
+        Positioned(
+          right: 0,
+          top: 0,
+          child: Icon(IconFont.close,
+              size: glyph, color: color.withOpacity(0.5)),
+        ),
+        Positioned(
+          left: 0,
+          bottom: 0,
+          child: Icon(IconFont.close, size: glyph, color: color),
+        ),
+      ],
+    ),
+  );
+}
+
 class ActionIcon extends StatefulWidget {
   final String? message;
   final IconData icon;
@@ -1256,6 +1299,14 @@ class ActionIcon extends StatefulWidget {
   final bool isClose;
   final double iconSize;
   final double boxSize;
+  // Alternate look and action while Ctrl is held and the pointer is over this
+  // button. `ctrlOnTap` gates the whole behaviour; null keeps the plain icon.
+  final Widget Function(Color color, double size)? ctrlIconBuilder;
+  final String? ctrlMessage;
+  final GestureTapCallback? ctrlOnTap;
+  // Appended to the plain message as a second line, so the Ctrl variant is
+  // discoverable without holding Ctrl first.
+  final String? ctrlHint;
 
   const ActionIcon(
       {Key? key,
@@ -1265,7 +1316,11 @@ class ActionIcon extends StatefulWidget {
       this.onTapDown,
       this.isClose = false,
       this.iconSize = _kActionIconSize,
-      this.boxSize = _kTabBarHeight - 1})
+      this.boxSize = _kTabBarHeight - 1,
+      this.ctrlIconBuilder,
+      this.ctrlMessage,
+      this.ctrlOnTap,
+      this.ctrlHint})
       : super(key: key);
 
   @override
@@ -1274,40 +1329,82 @@ class ActionIcon extends StatefulWidget {
 
 class _ActionIconState extends State<ActionIcon> {
   final hover = false.obs;
+  final ctrlDown = false.obs;
+  Timer? _ctrlPollTimer;
+
+  bool get _hasCtrlVariant => widget.ctrlOnTap != null;
+
+  @override
+  void dispose() {
+    _ctrlPollTimer?.cancel();
+    super.dispose();
+  }
+
+  // Polled rather than driven by key events: in a remote window the rdev grab
+  // hook swallows key presses before Flutter sees them, so HardwareKeyboard
+  // alone never reports Ctrl. The native query covers that case, and only runs
+  // while this button is hovered.
+  void _pollCtrl() {
+    ctrlDown.value = HardwareKeyboard.instance.isControlPressed ||
+        bind.mainGetOptionSync(key: kQueryIsCtrlPressed) == 'Y';
+  }
+
+  void _onHover(bool value) {
+    hover.value = value;
+    if (!_hasCtrlVariant) return;
+    _ctrlPollTimer?.cancel();
+    _ctrlPollTimer = null;
+    if (value) {
+      _pollCtrl();
+      _ctrlPollTimer =
+          Timer.periodic(const Duration(milliseconds: 80), (_) => _pollCtrl());
+    } else {
+      ctrlDown.value = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: widget.message != null ? translate(widget.message!) : "",
-      waitDuration: const Duration(seconds: 1),
-      child: InkWell(
-        hoverColor: widget.isClose
-            ? const Color.fromARGB(255, 196, 43, 28)
-            : MyTheme.tabbar(context).hoverColor,
-        onHover: (value) => hover.value = value,
-        onTap: widget.onTap,
-        onTapDown: widget.onTapDown,
-        child: SizedBox(
-          height: widget.boxSize,
-          width: widget.boxSize,
-          child: widget.onTap == null
-              ? Icon(
-                  widget.icon,
-                  color: Colors.grey,
-                  size: widget.iconSize,
-                )
-              : Obx(
-                  () => Icon(
-                    widget.icon,
-                    color: hover.value && widget.isClose
-                        ? Colors.white
-                        : MyTheme.tabbar(context).unSelectedIconColor,
-                    size: widget.iconSize,
-                  ),
-                ),
+    return Obx(() {
+      final useCtrl = _hasCtrlVariant && hover.value && ctrlDown.value;
+      final String message;
+      if (useCtrl) {
+        message = translate(widget.ctrlMessage ?? widget.message ?? '');
+      } else if (widget.message == null) {
+        message = '';
+      } else if (_hasCtrlVariant && widget.ctrlHint != null) {
+        message =
+            '${translate(widget.message!)}\n${translate(widget.ctrlHint!)}';
+      } else {
+        message = translate(widget.message!);
+      }
+      final onTap = useCtrl ? widget.ctrlOnTap : widget.onTap;
+      final color = onTap == null
+          ? Colors.grey
+          : (hover.value && widget.isClose
+              ? Colors.white
+              : MyTheme.tabbar(context).unSelectedIconColor);
+      final Widget icon = useCtrl && widget.ctrlIconBuilder != null
+          ? widget.ctrlIconBuilder!(color ?? Colors.grey, widget.iconSize)
+          : Icon(widget.icon, color: color, size: widget.iconSize);
+      return Tooltip(
+        message: message,
+        waitDuration: const Duration(seconds: 1),
+        child: InkWell(
+          hoverColor: widget.isClose
+              ? const Color.fromARGB(255, 196, 43, 28)
+              : MyTheme.tabbar(context).hoverColor,
+          onHover: _onHover,
+          onTap: onTap,
+          onTapDown: widget.onTapDown,
+          child: SizedBox(
+            height: widget.boxSize,
+            width: widget.boxSize,
+            child: Center(child: icon),
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 }
 

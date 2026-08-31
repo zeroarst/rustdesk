@@ -1047,22 +1047,6 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('Use all my displays for the remote session'))));
   }
 
-  if (pi.isSupportMultiDisplay && pi.displaysCount.value > 1) {
-    final value = bind.mainGetPeerFlutterOptionSync(
-            id: id, k: kOptionCloseAllWindowsTogether) ==
-        'Y';
-    v.add(TToggleMenu(
-        value: value,
-        onChanged: (value) {
-          if (value == null) return;
-          bind.mainSetPeerFlutterOptionSync(
-              id: id,
-              k: kOptionCloseAllWindowsTogether,
-              v: value ? 'Y' : 'N');
-        },
-        child: Text(translate('Close all windows of this session together'))));
-  }
-
   // 444
   final codec_format = ffi.qualityMonitorModel.data.codecFormat;
   if (versionCmp(pi.version, "1.2.4") >= 0 &&

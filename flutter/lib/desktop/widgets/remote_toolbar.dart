@@ -2987,6 +2987,30 @@ class _CloseMenu extends StatelessWidget {
   const _CloseMenu({Key? key, required this.id, required this.ffi})
       : super(key: key);
 
+  // Two close glyphs stacked, the rear one offset up-right and dimmed, shown
+  // while Ctrl is held so the button reads as "close all" without changing size.
+  static Widget _closeAllIcon() {
+    const size = _ToolbarTheme.buttonSize;
+    const glyph = size * 0.72;
+    Widget glyphAt(double opacity) => SvgPicture.asset(
+          'assets/close.svg',
+          colorFilter: ColorFilter.mode(
+              Colors.white.withOpacity(opacity), BlendMode.srcIn),
+          width: glyph,
+          height: glyph,
+        );
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        children: [
+          Positioned(right: 0, top: 0, child: glyphAt(0.55)),
+          Positioned(left: 0, bottom: 0, child: glyphAt(1.0)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return _IconMenuButton(
@@ -2996,6 +3020,19 @@ class _CloseMenu extends StatelessWidget {
         if (await showConnEndAuditDialogCloseCanceled(ffi: ffi)) {
           return;
         }
+        closeConnection(id: id);
+      },
+      ctrlIcon: _closeAllIcon(),
+      ctrlTooltip: 'Close all windows of this session',
+      ctrlHint: 'Hold Ctrl to close all windows of this session',
+      ctrlOnPressed: () async {
+        if (await showConnEndAuditDialogCloseCanceled(ffi: ffi)) {
+          return;
+        }
+        // Close this peer in every remote window (one per display), then close
+        // this one regardless of whether it was in that list.
+        await rustDeskWinManager.call(
+            WindowType.Main, kWindowEventCloseForPeer, id);
         closeConnection(id: id);
       },
       color: _ToolbarTheme.redColor,
@@ -3015,6 +3052,14 @@ class _IconMenuButton extends StatefulWidget {
   final double? vMargin;
   final bool topLevel;
   final double? width;
+  // Alternate look and action while Ctrl is held and the pointer is over this
+  // button. `ctrlOnPressed` gates the whole behaviour.
+  final Widget? ctrlIcon;
+  final String? ctrlTooltip;
+  final VoidCallback? ctrlOnPressed;
+  // Appended to the plain tooltip as a second line, so the Ctrl variant is
+  // discoverable without holding Ctrl first.
+  final String? ctrlHint;
   const _IconMenuButton({
     Key? key,
     this.assetName,
@@ -3027,6 +3072,10 @@ class _IconMenuButton extends StatefulWidget {
     this.vMargin,
     this.topLevel = true,
     this.width,
+    this.ctrlIcon,
+    this.ctrlTooltip,
+    this.ctrlOnPressed,
+    this.ctrlHint,
   }) : super(key: key);
 
   @override
@@ -3035,11 +3084,57 @@ class _IconMenuButton extends StatefulWidget {
 
 class _IconMenuButtonState extends State<_IconMenuButton> {
   bool hover = false;
+  bool ctrlDown = false;
+  Timer? _ctrlPollTimer;
+
+  bool get _hasCtrlVariant => widget.ctrlOnPressed != null;
+  bool get _useCtrl => _hasCtrlVariant && hover && ctrlDown;
+
+  @override
+  void dispose() {
+    _ctrlPollTimer?.cancel();
+    super.dispose();
+  }
+
+  // Polled, not driven by key events: the rdev grab hook swallows key presses
+  // while a session owns the keyboard, so HardwareKeyboard alone never reports
+  // Ctrl here. Runs only while this button is hovered.
+  void _pollCtrl() {
+    final down = HardwareKeyboard.instance.isControlPressed ||
+        bind.mainGetOptionSync(key: kQueryIsCtrlPressed) == 'Y';
+    if (down != ctrlDown && mounted) {
+      setState(() => ctrlDown = down);
+    }
+  }
+
+  void _onHover(bool value) {
+    setState(() => hover = value);
+    if (!_hasCtrlVariant) return;
+    _ctrlPollTimer?.cancel();
+    _ctrlPollTimer = null;
+    if (value) {
+      _pollCtrl();
+      _ctrlPollTimer =
+          Timer.periodic(const Duration(milliseconds: 80), (_) => _pollCtrl());
+    } else if (ctrlDown) {
+      setState(() => ctrlDown = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     assert(widget.assetName != null || widget.icon != null);
-    final icon = widget.icon ??
+    final useCtrl = _useCtrl;
+    final String tooltip;
+    if (useCtrl) {
+      tooltip = translate(widget.ctrlTooltip ?? widget.tooltip);
+    } else if (_hasCtrlVariant && widget.ctrlHint != null) {
+      tooltip = '${translate(widget.tooltip)}\n${translate(widget.ctrlHint!)}';
+    } else {
+      tooltip = translate(widget.tooltip);
+    }
+    final icon = (useCtrl ? widget.ctrlIcon : null) ??
+        widget.icon ??
         SvgPicture.asset(
           widget.assetName!,
           colorFilter: ColorFilter.mode(Colors.white, BlendMode.srcIn),
@@ -3054,12 +3149,10 @@ class _IconMenuButtonState extends State<_IconMenuButton> {
               backgroundColor: MaterialStatePropertyAll(Colors.transparent),
               padding: MaterialStatePropertyAll(EdgeInsets.zero),
               overlayColor: MaterialStatePropertyAll(Colors.transparent)),
-          onHover: (value) => setState(() {
-                hover = value;
-              }),
-          onPressed: widget.onPressed,
+          onHover: _onHover,
+          onPressed: useCtrl ? widget.ctrlOnPressed : widget.onPressed,
           child: Tooltip(
-            message: translate(widget.tooltip),
+            message: tooltip,
             child: Material(
                 type: MaterialType.transparency,
                 child: Ink(
@@ -3074,7 +3167,7 @@ class _IconMenuButtonState extends State<_IconMenuButton> {
         horizontal: widget.hMargin ?? _ToolbarTheme.buttonHMargin,
         vertical: widget.vMargin ?? _ToolbarTheme.buttonVMargin);
     button = Tooltip(
-      message: translate(widget.tooltip),
+      message: tooltip,
       child: button,
     );
     if (widget.topLevel) {

@@ -957,7 +957,24 @@ pub fn main_get_option(key: String) -> String {
     get_option(key)
 }
 
+// Reserved `main_get_option_sync` key: not a config option but a live query for
+// whether Ctrl is held, used by the tab bar's "close all windows" affordance.
+// The flutter_rust_bridge bindings are generated and gitignored, so adding a
+// real entry point would need the codegen tool; routing through this existing
+// generic getter leaves the bridge untouched.
+pub const QUERY_IS_CTRL_PRESSED: &str = "__query_is_ctrl_pressed";
+
 pub fn main_get_option_sync(key: String) -> SyncReturn<String> {
+    if key == QUERY_IS_CTRL_PRESSED {
+        return SyncReturn(
+            if crate::keyboard::is_ctrl_pressed() {
+                "Y"
+            } else {
+                "N"
+            }
+            .to_owned(),
+        );
+    }
     SyncReturn(get_option(key))
 }
 
