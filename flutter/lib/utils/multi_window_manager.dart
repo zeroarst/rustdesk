@@ -203,7 +203,17 @@ class RustDeskMultiWindowManager {
             type, remoteId, msg, windows, screenRect != null);
         return MultiWindowCallResult(windowId, null);
       } else {
-        return call(type, methodName, msg);
+        // `call` hands the session to an existing window without touching the
+        // active/inactive sets, and that window only registers itself later,
+        // from its own `windowOnTop`. In between, the "use all my displays"
+        // layout asks for its next display and reserves the very window that
+        // just took the session, so that display arrives as a duplicate tab
+        // instead of opening its own window.
+        final res = await call(type, methodName, msg);
+        if (res.windowId != kInvalidWindowId) {
+          await registerActiveWindow(res.windowId);
+        }
+        return res;
       }
     } else {
       // Reserve the reused window synchronously: concurrent calls (e.g. one
