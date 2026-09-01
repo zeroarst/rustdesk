@@ -1792,6 +1792,10 @@ String perDisplayFrameKey(WindowType type, int display) =>
 typedef WindowKey = ({WindowType type, int? windowId});
 
 LastWindowPosition? _lastWindowPosition = null;
+// Where the window actually was when the position above was captured. A
+// maximized window's remembered frame comes from a key shared by every remote
+// window, so on its own it says nothing about the monitor this one is on.
+Rect? _lastWindowFrame = null;
 final Debouncer _saveWindowDebounce = Debouncer(delay: Duration(seconds: 1));
 
 /// Save window position and size on exit
@@ -1851,6 +1855,11 @@ Future<void> saveWindowPosition(WindowType type,
       isMaximized = await wc.isMaximized();
       if (isFullscreen || isMaximized) {
         setPreFrame();
+        try {
+          _lastWindowFrame = await wc.getFrame();
+        } catch (e) {
+          _lastWindowFrame = null;
+        }
       } else {
         final Rect frame;
         try {
@@ -1862,6 +1871,7 @@ Future<void> saveWindowPosition(WindowType type,
         }
         position = frame.topLeft;
         sz = frame.size;
+        _lastWindowFrame = frame;
       }
       break;
   }
@@ -1929,17 +1939,51 @@ Future _saveSessionWindowPosition(WindowType windowType, int windowId,
     bool isMaximized, bool isFullscreen, LastWindowPosition pos) async {
   final remoteList = await DesktopMultiWindow.invokeMethod(
       windowId, kWindowEventGetRemoteList, null);
+
+  // A maximized/fullscreen window never reports its own position, so a monitor
+  // it was moved to would never be remembered: it would restore onto whichever
+  // screen its last windowed frame belonged to. Relocate the remembered frame
+  // onto the screen the window actually occupies, keeping its offset within
+  // that screen.
+  List<Rect> screens = [];
+  if ((isMaximized || isFullscreen) && _lastWindowFrame != null) {
+    screens = await getScreenRectList();
+  }
+  Rect? screenOf(Rect r) {
+    Rect? best;
+    double bestArea = 0;
+    for (final s in screens) {
+      final i = r.intersect(s);
+      final area = i.width > 0 && i.height > 0 ? i.width * i.height : 0.0;
+      if (area > bestArea) {
+        bestArea = area;
+        best = s;
+      }
+    }
+    return best;
+  }
+
   getPeerPos(String peerId, String key) {
     if (isMaximized || isFullscreen) {
       final peerPos = bind.mainGetPeerFlutterOptionSync(id: peerId, k: key);
       var lpos = LastWindowPosition.loadFromString(peerPos);
-      return LastWindowPosition(
-              lpos?.width ?? pos.offsetWidth,
-              lpos?.height ?? pos.offsetHeight,
-              lpos?.offsetWidth ?? pos.offsetWidth,
-              lpos?.offsetHeight ?? pos.offsetHeight,
-              isMaximized,
-              isFullscreen)
+      final w = lpos?.width ?? pos.offsetWidth;
+      final h = lpos?.height ?? pos.offsetHeight;
+      var ox = lpos?.offsetWidth ?? pos.offsetWidth;
+      var oy = lpos?.offsetHeight ?? pos.offsetHeight;
+      final now = _lastWindowFrame == null ? null : screenOf(_lastWindowFrame!);
+      if (now != null && ox != null && oy != null) {
+        final was = screenOf(Rect.fromLTWH(ox, oy, w ?? 1, h ?? 1));
+        if (was != now) {
+          final dx = was == null ? 0.0 : ox - was.left;
+          final dy = was == null ? 0.0 : oy - was.top;
+          ox = (now.left + dx)
+              .clamp(now.left, max(now.left, now.right - (w ?? 0)));
+          oy = (now.top + dy)
+              .clamp(now.top, max(now.top, now.bottom - (h ?? 0)));
+        }
+      }
+      return LastWindowPosition(w, h, ox, oy, isMaximized, isFullscreen)
           .toString();
     } else {
       return pos.toString();
